@@ -1,14 +1,16 @@
 import React, { useMemo, useState } from 'react';
 import {
   ArrowLeft,
-  ArrowRight,
+  Bookmark,
   Calculator,
+  Check,
   EyeOff,
   Pencil,
   Plus,
   RotateCcw,
   Search,
   Settings2,
+  SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
 import {
@@ -20,13 +22,14 @@ import {
 } from '../types/grades';
 import {
   cleanAssignmentDisplayTitle,
+  countOverlayChanges,
   formatGpa,
   formatPercent,
   formatSignedDelta,
   getGradeToneClass,
   solveRequiredScore,
 } from '../utils/gradeMath';
-import { CourseCategoryWeightsChart, GradeTrendChart } from './GradeCharts';
+import { GradeTrendChart } from './GradeCharts';
 
 interface CourseDetailViewProps {
   course: Course;
@@ -44,8 +47,11 @@ interface CourseDetailViewProps {
   onToggleHypotheticalExclude: (courseId: string, assignmentId: string) => void;
   onResetHypotheticalItem: (courseId: string, assignmentId: string) => void;
   onRemoveHypotheticalAdded: (courseId: string, assignmentId: string) => void;
-  onFillUngraded: (courseId: string, percent: number) => void;
+  onResetCourseHypothetical: (courseId: string) => void;
+  onSaveScenario: () => void;
+  onApplyHypothetical: () => void;
   onSimulateTargetScore: (courseId: string, assignmentIds: string[], requiredPercent: number) => void;
+  onSetHypothetical: (next: boolean) => void;
 }
 
 export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
@@ -64,23 +70,24 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
   onToggleHypotheticalExclude,
   onResetHypotheticalItem,
   onRemoveHypotheticalAdded,
-  onFillUngraded,
+  onResetCourseHypothetical,
+  onSaveScenario,
+  onApplyHypothetical,
   onSimulateTargetScore,
+  onSetHypothetical,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'graded' | 'upcoming' | 'modified'>('all');
-
-  const ungradedOptions = useMemo(
-    () =>
-      displayResult.effectiveAssignments.filter(
-        (a) => !a.isRemoved && !a.excused && a.originalEarned === null && !a.extraCredit
-      ),
-    [displayResult.effectiveAssignments]
-  );
+  const [confirmApply, setConfirmApply] = useState(false);
 
   const [targetLetter, setTargetLetter] = useState<string>('A-');
   const [targetScope, setTargetScope] = useState<string>('all-ungraded');
+
+  const courseHypotheticalChanges = useMemo(
+    () => countOverlayChanges(overlay, course.id),
+    [overlay, course.id]
+  );
 
   const selectedScaleEntry =
     gradeScale.find((g) => g.letter === targetLetter) || gradeScale[0];
@@ -139,22 +146,18 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
     });
   }, [displayResult.effectiveAssignments, categoryFilter, statusFilter, searchQuery, categoryMap]);
 
-  const ungradedCount = displayResult.effectiveAssignments.filter(
-    (a) => !a.isRemoved && !a.excused && a.originalEarned === null && !a.extraCredit
-  ).length;
-
   return (
-    <div className="space-y-6">
-      {/* Course Header */}
+    <div className="space-y-6 max-w-5xl mx-auto">
+      {/* Course Header with Dedicated Actual / What-If Slider */}
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+        <div className="min-w-0">
           <button
             type="button"
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 transition-colors mb-2"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            All Courses
+            Back to Grades
           </button>
           <div className="flex items-baseline gap-3 flex-wrap">
             <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
@@ -164,8 +167,10 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
               {course.code}
             </span>
           </div>
-          <div className="mt-1 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 flex-wrap">
-            <span>{course.instructor}</span>
+          <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400 flex-wrap">
+            <span className="font-medium text-slate-800 dark:text-slate-200">
+              Teacher: {course.instructor}
+            </span>
             <span aria-hidden="true">·</span>
             <span className="tabular-nums">{course.credits.toFixed(1)} credits</span>
             <span aria-hidden="true">·</span>
@@ -179,15 +184,63 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {/* Class-Only Actual / What-If Segmented Slider */}
+          <div
+            role="group"
+            aria-label="Class grade viewing mode"
+            className="inline-flex items-center p-1 bg-white/85 dark:bg-slate-900/80 border border-slate-200/80 dark:border-white/15 rounded-xl shrink-0"
+          >
+            <button
+              type="button"
+              aria-pressed={!isHypothetical}
+              onClick={() => {
+                onSetHypothetical(false);
+                setConfirmApply(false);
+              }}
+              className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                !isHypothetical
+                  ? 'bg-slate-900 text-white dark:bg-white/15 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              Actual
+            </button>
+            <button
+              type="button"
+              aria-pressed={isHypothetical}
+              onClick={() => onSetHypothetical(true)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                isHypothetical
+                  ? 'bg-amber-600 dark:bg-amber-500 text-white dark:text-slate-950 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
+              What-If
+              {courseHypotheticalChanges > 0 && (
+                <span
+                  className={`font-mono text-[11px] tabular-nums ${
+                    isHypothetical
+                      ? 'text-amber-100 dark:text-slate-900 font-semibold'
+                      : 'text-amber-700 dark:text-amber-400 font-semibold'
+                  }`}
+                >
+                  ({courseHypotheticalChanges})
+                </span>
+              )}
+            </button>
+          </div>
+
           <button
             type="button"
             onClick={onEditCourse}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/75 dark:bg-white/[0.06] hover:bg-white dark:hover:bg-white/10 border border-slate-200/80 dark:border-white/10 rounded-xl transition-colors whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-white/[0.06] hover:bg-white dark:hover:bg-white/10 border border-slate-200/80 dark:border-white/10 rounded-xl transition-colors whitespace-nowrap"
           >
             <Settings2 className="w-3.5 h-3.5" />
-            Settings
+            Course Info
           </button>
+
           <button
             type="button"
             onClick={onAddAssignment}
@@ -198,12 +251,98 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
             }`}
           >
             <Plus className="w-3.5 h-3.5" />
-            {isHypothetical ? 'Add Hypothetical' : 'Add Assignment'}
+            {isHypothetical ? 'Add What-If Assignment' : 'Add Assignment'}
           </button>
         </div>
       </div>
 
-      {/* Standing & Category Breakdown Liquid Glass Panel */}
+      {/* Hypothetical Mode Live Impact Bar (only shown inside this class when What-If is ON) */}
+      {isHypothetical && (
+        <section
+          aria-label="Hypothetical grade impact"
+          className="glass-hypothetical rounded-2xl px-4 sm:px-5 py-3.5 flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="space-y-0.5 min-w-0">
+            <div className="text-xs font-semibold text-amber-900 dark:text-amber-200 flex items-center gap-2 flex-wrap">
+              <span>What-If Sandbox Active</span>
+              <span className="font-mono font-normal text-amber-800/80 dark:text-amber-300/80 tabular-nums">
+                {formatPercent(actualResult.percentage)} ({actualResult.letter}) →{' '}
+                <strong className="font-semibold text-slate-900 dark:text-white">
+                  {formatPercent(displayResult.percentage)} ({displayResult.letter})
+                </strong>
+              </span>
+              {pctDelta !== null && Math.abs(pctDelta) >= 0.05 && (
+                <span
+                  className={`font-mono font-bold tabular-nums ${
+                    pctDelta > 0
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-rose-700 dark:text-rose-400'
+                  }`}
+                >
+                  {pctDelta > 0 ? '▲' : '▼'} {formatSignedDelta(pctDelta, '%', 2)}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-amber-900/75 dark:text-amber-200/75">
+              Edit any assignment score below or add a new hypothetical assignment to test its impact on this class.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {courseHypotheticalChanges > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onResetCourseHypothetical(course.id)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/70 hover:bg-white dark:hover:bg-slate-800 border border-slate-200/80 dark:border-white/15 rounded-xl transition-colors whitespace-nowrap"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  onClick={onSaveScenario}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/70 hover:bg-white dark:hover:bg-slate-800 border border-slate-200/80 dark:border-white/15 rounded-xl transition-colors whitespace-nowrap"
+                >
+                  <Bookmark className="w-3.5 h-3.5" />
+                  Save
+                </button>
+                {confirmApply ? (
+                  <div className="inline-flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onApplyHypothetical();
+                        setConfirmApply(false);
+                      }}
+                      className="px-2.5 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl whitespace-nowrap"
+                    >
+                      Confirm Apply
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmApply(false)}
+                      className="px-2 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmApply(true)}
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 dark:bg-amber-500 dark:text-slate-950 rounded-xl transition-colors whitespace-nowrap"
+                  >
+                    Apply to Real
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Standing & Category Breakdown Panel */}
       <section
         className={`rounded-2xl overflow-hidden transition-colors ${
           isHypothetical ? 'glass-hypothetical' : 'glass-panel'
@@ -250,41 +389,69 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                       {pctDelta > 0 ? '▲' : '▼'} {formatSignedDelta(pctDelta, '%', 1)}
                     </span>
                   ) : (
-                    <span className="text-slate-400 dark:text-slate-500">Unchanged</span>
+                    <span className="text-slate-400 dark:text-slate-500">No change</span>
                   )}
                 </div>
               )}
             </div>
 
             <div className="mt-5 pt-4 border-t border-slate-200/70 dark:border-white/[0.08] flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-              <span>GPA: {formatGpa(displayResult.gpa)}</span>
-              <span>{Math.round(displayResult.gradedWeightPercent)}% graded</span>
+              <span>Course GPA: {formatGpa(displayResult.gpa)}</span>
+              <span>{Math.round(displayResult.gradedWeightPercent)}% weight graded</span>
             </div>
           </div>
 
-          {/* Category Weights Donut & Breakdown */}
-          <div className="lg:col-span-8">
-            <CourseCategoryWeightsChart
-              course={course}
-              actualResult={actualResult}
-              displayResult={displayResult}
-              isHypothetical={isHypothetical}
-            />
+          {/* Clean Category Breakdown Progress Bars */}
+          <div className="lg:col-span-8 p-6 flex flex-col justify-center space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Category Breakdown
+            </h3>
+            <div className="space-y-3">
+              {displayResult.categoryResults.map((catRes) => {
+                const pct = catRes.percentage;
+                return (
+                  <div key={catRes.category.id} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-medium text-slate-800 dark:text-slate-200 truncate pr-2">
+                        {catRes.category.name}
+                        {course.gradingMode === 'weighted' && (
+                          <span className="text-slate-400 ml-1.5 font-mono">
+                            ({catRes.category.weight}%)
+                          </span>
+                        )}
+                      </span>
+                      <span className="font-mono font-semibold text-slate-900 dark:text-slate-100 tabular-nums shrink-0">
+                        {pct !== null ? `${pct.toFixed(1)}%` : 'No grades'}
+                        <span className="text-slate-400 font-normal ml-1.5">
+                          ({catRes.earnedPoints.toFixed(1)}/{catRes.possiblePoints.toFixed(1)} pts)
+                        </span>
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-slate-200/80 dark:bg-white/10 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all bg-blue-600 dark:bg-sky-400"
+                        style={{ width: `${Math.max(0, Math.min(100, pct ?? 0))}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       </section>
 
-      {/* Course Grade Trajectory Over the Year */}
+      {/* Course Grade Performance Over the Year (Class-Specific Chart) */}
       <GradeTrendChart
         courses={[course]}
         gradeScale={gradeScale}
         isHypothetical={isHypothetical}
         overlay={overlay}
         singleCourseMode
-        title={`${course.name} · Grade Over Time`}
+        title={`${course.name} · Performance Over the Year`}
       />
 
-      {/* Inline Target Grade Solver Bar */}
+      {/* Built-in Target Grade Calculator (Class-Specific) */}
       <section
         aria-label="Target grade calculator"
         className="glass-panel rounded-2xl px-4 sm:px-5 py-4 flex flex-wrap items-center justify-between gap-3 sm:gap-4"
@@ -318,687 +485,279 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
               onChange={(e) => setTargetScope(e.target.value)}
               className="px-2.5 py-1.5 text-xs font-medium bg-white/80 dark:bg-slate-950/70 border border-slate-200 dark:border-white/10 rounded-lg text-slate-900 dark:text-slate-100 w-full sm:w-auto sm:max-w-[240px] truncate focus:outline-none focus:ring-2 focus:ring-blue-400/30"
             >
-              <option value="all-ungraded">
-                All Remaining Ungraded ({ungradedOptions.length})
-              </option>
+              <option value="all-ungraded">All Remaining Ungraded</option>
               {displayResult.effectiveAssignments
                 .filter((a) => !a.isRemoved && !a.excused && !a.extraCredit)
                 .map((a, idx) => (
                   <option key={a.id} value={a.id}>
-                    {cleanAssignmentDisplayTitle(a.title, categoryMap.get(a.categoryId)?.name, idx)} (
-                    {a.earned === null ? 'Upcoming' : `${a.earned}/${a.possible}`})
+                    {cleanAssignmentDisplayTitle(a.title, categoryMap.get(a.categoryId)?.name, idx)}{' '}
+                    ({a.earned === null ? 'Upcoming' : `${a.earned}/${a.possible}`})
                   </option>
                 ))}
             </select>
           </label>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          {quickSolve && quickSolve.status === 'no-target' && (
-            <span className="text-slate-500 dark:text-slate-400">
-              No ungraded assignments to solve.
-            </span>
-          )}
-          {quickSolve && quickSolve.status === 'secured' && (
-            <span className="font-medium text-emerald-700 dark:text-emerald-400">
-              Secured — even 0% keeps {targetLetter} ({formatPercent(quickSolve.projectedFinalIfZero)}).
-            </span>
-          )}
-          {quickSolve && quickSolve.status === 'impossible' && (
-            <span className="font-medium text-rose-700 dark:text-rose-400">
-              Unreachable via selected item (100% yields {formatPercent(quickSolve.projectedFinalIfPerfect)}).
-            </span>
-          )}
-          {quickSolve &&
-            (quickSolve.status === 'achievable' ||
-              quickSolve.status === 'stretch' ||
-              quickSolve.status === 'extra-credit') &&
-            quickSolve.requiredPercent !== null && (
-              <>
-                <span className="text-slate-700 dark:text-slate-300 tabular-nums">
-                  Need{' '}
-                  <strong
-                    className={`font-mono text-sm ${
-                      quickSolve.status === 'extra-credit'
-                        ? 'text-rose-700 dark:text-rose-400'
-                        : quickSolve.status === 'stretch'
-                          ? 'text-amber-700 dark:text-amber-400'
-                          : 'text-slate-900 dark:text-white'
-                    }`}
-                  >
-                    {formatPercent(quickSolve.requiredPercent)}
-                  </strong>
-                  {quickSolve.requiredPoints !== null && quickSolve.possiblePoints !== null && (
-                    <span className="font-mono text-slate-500 dark:text-slate-400 ml-1">
-                      ({quickSolve.requiredPoints} / {quickSolve.possiblePoints})
-                    </span>
-                  )}
-                  {quickSolve.status === 'extra-credit' && (
-                    <span className="text-rose-700 dark:text-rose-400 ml-1.5">· Extra credit</span>
-                  )}
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    onSimulateTargetScore(
-                      course.id,
-                      quickSolve.targetAssignmentIds,
-                      quickSolve.requiredPercent as number
-                    )
-                  }
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-amber-900 dark:text-amber-200 bg-amber-100/90 dark:bg-amber-500/20 hover:bg-amber-200/90 dark:hover:bg-amber-500/30 rounded-lg transition-colors whitespace-nowrap"
-                >
-                  Simulate
-                  <ArrowRight className="w-3 h-3" />
-                </button>
-              </>
+        {quickSolve && quickSolve.requiredPercent !== null && (
+          <div className="flex items-center gap-3 w-full lg:w-auto justify-between lg:justify-end text-xs">
+            <div className="font-mono tabular-nums">
+              Required:{' '}
+              <span
+                className={`font-bold ${
+                  quickSolve.requiredPercent <= 100
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-rose-700 dark:text-rose-400'
+                }`}
+              >
+                {quickSolve.requiredPercent > 200
+                  ? 'Over 200%'
+                  : `${quickSolve.requiredPercent.toFixed(1)}%`}
+              </span>{' '}
+              <span className="text-slate-400">
+                ({(quickSolve.requiredPoints ?? 0).toFixed(1)} pts)
+              </span>
+            </div>
+            {quickSolve.requiredPercent <= 100 && quickSolve.requiredPercent >= 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  onSimulateTargetScore(
+                    course.id,
+                    quickSolve.targetAssignmentIds,
+                    quickSolve.requiredPercent!
+                  )
+                }
+                className="px-3 py-1.5 font-medium text-white bg-blue-600 hover:bg-blue-700 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400 rounded-lg transition-colors whitespace-nowrap shadow-xs"
+              >
+                Test in What-If
+              </button>
             )}
-        </div>
+          </div>
+        )}
       </section>
 
-      {/* Assignment Ledger Section */}
-      <section aria-label="Assignment ledger">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-            {/* Search */}
-            <div className="relative flex-1 min-w-[160px] sm:flex-initial">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Filter assignments..."
-                className="pl-8 pr-3 py-2 sm:py-1.5 text-xs bg-white/75 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/10 rounded-xl text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-400/30 w-full sm:w-48"
-              />
-            </div>
-
-            {/* Category Filter */}
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              aria-label="Filter by category"
-              className="px-2.5 py-2 sm:py-1.5 text-xs bg-white/75 dark:bg-slate-900/70 border border-slate-200/80 dark:border-white/10 rounded-xl text-slate-700 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-400/30 max-w-full"
-            >
-              <option value="all">All Categories</option>
-              {course.categories.map((cat) => (
-                <option key={cat.id} value={cat.id}>
-                  {cat.name}
-                </option>
-              ))}
-            </select>
-
-            {/* Status Segmented Filter */}
-            <div className="inline-flex flex-wrap items-center p-0.5 bg-slate-200/60 dark:bg-white/[0.06] rounded-xl border border-slate-200/80 dark:border-white/10 w-full sm:w-auto">
-              {(['all', 'graded', 'upcoming'] as const).map((st) => (
+      {/* Assignments Table & Filters */}
+      <section className="glass-panel rounded-2xl overflow-hidden">
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200/70 dark:border-white/10 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+              Assignments ({filteredAssignments.length})
+            </h2>
+            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/80 p-1 rounded-xl">
+              {(['all', 'graded', 'upcoming', 'modified'] as const).map((st) => (
                 <button
                   key={st}
                   type="button"
                   onClick={() => setStatusFilter(st)}
-                  className={`flex-1 sm:flex-initial px-2.5 py-1.5 sm:py-1 text-xs font-medium rounded-lg capitalize transition-colors whitespace-nowrap ${
+                  className={`px-2.5 py-1 text-xs font-medium rounded-lg capitalize transition-colors ${
                     statusFilter === st
                       ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                   }`}
                 >
                   {st}
                 </button>
               ))}
-              {isHypothetical && (
-                <button
-                  type="button"
-                  onClick={() => setStatusFilter('modified')}
-                  className={`flex-1 sm:flex-initial px-2.5 py-1.5 sm:py-1 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                    statusFilter === 'modified'
-                      ? 'bg-amber-100 dark:bg-amber-500/25 text-amber-900 dark:text-amber-200'
-                      : 'text-amber-800 dark:text-amber-400 hover:text-amber-950 dark:hover:text-amber-200'
-                  }`}
-                >
-                  Modified ({displayResult.modifiedCount})
-                </button>
-              )}
             </div>
           </div>
 
-          {isHypothetical && ungradedCount > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 text-xs">
-              <span className="text-slate-500 dark:text-slate-400 mr-1">Fill upcoming:</span>
-              <button
-                type="button"
-                onClick={() => onFillUngraded(course.id, 90)}
-                className="px-2.5 py-1.5 sm:py-1 font-mono text-xs font-medium text-amber-900 dark:text-amber-200 bg-amber-50/90 dark:bg-amber-500/15 hover:bg-amber-100 dark:hover:bg-amber-500/25 border border-amber-300/60 dark:border-amber-400/25 rounded-lg transition-colors whitespace-nowrap"
-              >
-                90%
-              </button>
-              <button
-                type="button"
-                onClick={() => onFillUngraded(course.id, 100)}
-                className="px-2.5 py-1.5 sm:py-1 font-mono text-xs font-medium text-amber-900 dark:text-amber-200 bg-amber-50/90 dark:bg-amber-500/15 hover:bg-amber-100 dark:hover:bg-amber-500/25 border border-amber-300/60 dark:border-amber-400/25 rounded-lg transition-colors whitespace-nowrap"
-              >
-                100%
-              </button>
-              {actualResult.percentage !== null && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    onFillUngraded(course.id, Math.round(actualResult.percentage as number))
-                  }
-                  className="px-2.5 py-1.5 sm:py-1 text-xs font-medium text-amber-900 dark:text-amber-200 bg-amber-50/90 dark:bg-amber-500/15 hover:bg-amber-100 dark:hover:bg-amber-500/25 border border-amber-300/60 dark:border-amber-400/25 rounded-lg transition-colors whitespace-nowrap"
-                >
-                  Match avg ({Math.round(actualResult.percentage)}%)
-                </button>
-              )}
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <select
+              aria-label="Filter assignments by category"
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="px-3 py-1.5 text-xs font-medium bg-white/80 dark:bg-slate-900/75 border border-slate-300/80 dark:border-white/15 rounded-xl text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+            >
+              <option value="all">All Categories</option>
+              {course.categories.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+
+            <div className="relative flex items-center">
+              <Search className="absolute left-3 w-3.5 h-3.5 text-slate-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search assignments..."
+                className="w-44 sm:w-56 bg-white/80 dark:bg-slate-900/75 border border-slate-300/80 dark:border-white/15 rounded-xl pl-9 pr-3 py-1.5 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+              />
             </div>
-          )}
+          </div>
         </div>
 
-        {/* Ledger Container */}
-        <div className="glass-panel rounded-2xl overflow-hidden">
-          {/* Mobile Zero-Scroll Assignment Cards */}
-          <div className="md:hidden divide-y divide-slate-200/60 dark:divide-white/[0.07]">
-            {filteredAssignments.length === 0 ? (
-              <div className="py-10 px-4 text-center text-sm text-slate-500 dark:text-slate-400">
-                {displayResult.effectiveAssignments.length === 0
-                  ? 'No assignments posted in this class yet.'
-                  : 'No assignments match the current filter.'}
-              </div>
-            ) : (
-              filteredAssignments.map((item, idx) => {
-                const cat = categoryMap.get(item.categoryId);
-                const displayTitle = cleanAssignmentDisplayTitle(item.title, cat?.name, idx);
-                const pct =
-                  item.earned !== null && item.possible > 0 && !item.isRemoved && !item.excused
-                    ? (item.earned / item.possible) * 100
-                    : null;
-                const origPct =
-                  item.originalEarned !== null && item.originalPossible > 0
-                    ? (item.originalEarned / item.originalPossible) * 100
-                    : null;
-                const sliderMax = Math.max(item.possible, item.earned ?? 0);
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-200/70 dark:border-white/10 bg-slate-50/40 dark:bg-white/[0.02] text-xs font-medium text-slate-500 dark:text-slate-400">
+                <th className="py-3 px-4 sm:px-6">Assignment</th>
+                <th className="py-3 px-3 sm:px-4">Category</th>
+                <th className="py-3 px-3 sm:px-4">Due Date</th>
+                <th className="py-3 px-3 sm:px-4 text-right">Score</th>
+                <th className="py-3 px-4 sm:px-6 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200/50 dark:divide-white/[0.06] text-sm">
+              {filteredAssignments.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="py-12 text-center text-xs text-slate-500">
+                    No matching assignments found.
+                  </td>
+                </tr>
+              ) : (
+                filteredAssignments.map((item, idx) => {
+                  const catName = categoryMap.get(item.categoryId)?.name || 'Coursework';
+                  const cleanTitle = cleanAssignmentDisplayTitle(item.title, catName, idx);
+                  const isDropped = item.isDropped;
+                  const pct =
+                    item.earned !== null && item.possible > 0
+                      ? (item.earned / item.possible) * 100
+                      : null;
 
-                return (
-                  <div
-                    key={item.id}
-                    className={`p-4 space-y-2.5 transition-colors ${
-                      item.isRemoved
-                        ? 'bg-slate-100/60 dark:bg-white/[0.02] opacity-55'
-                        : isHypothetical && item.isModified
-                          ? 'bg-amber-50/60 dark:bg-amber-500/10'
-                          : ''
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div
-                          className={`text-sm font-medium break-words ${
-                            item.isRemoved || item.excused
-                              ? 'line-through text-slate-400 dark:text-slate-500'
-                              : 'text-slate-900 dark:text-slate-100'
-                          }`}
-                        >
-                          {displayTitle}
-                        </div>
-                        <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 flex-wrap">
-                          <span>{cat?.name || 'Uncategorized'}</span>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-mono tabular-nums">{item.dueDate}</span>
-                          {item.extraCredit && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span className="text-emerald-700 dark:text-emerald-400 font-medium">
-                                Extra Credit
-                              </span>
-                            </>
-                          )}
-                          {item.excused && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span>Excused</span>
-                            </>
-                          )}
-                          {item.isDropped && !item.isRemoved && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span>Dropped</span>
-                            </>
-                          )}
-                          {item.isRemoved && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span className="text-amber-700 dark:text-amber-400 font-medium">
-                                Excluded
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </div>
+                  const statusNote = [
+                    item.extraCredit ? 'Extra Credit' : null,
+                    item.excused ? 'Excused' : null,
+                    isDropped ? 'Dropped' : null,
+                    item.isModified && !item.isRemoved ? 'What-If' : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
 
-                      <div className="text-right shrink-0 tabular-nums">
-                        {item.isRemoved ? (
-                          <span className="font-mono text-xs text-slate-400 dark:text-slate-500">
-                            Excluded
-                          </span>
-                        ) : pct !== null ? (
-                          <>
-                            <div className={`font-mono text-sm font-semibold ${getGradeToneClass(pct)}`}>
-                              {formatPercent(pct)}
-                            </div>
-                            <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
-                              {item.earned}/{item.possible}
-                            </div>
-                          </>
-                        ) : (
-                          <div className="font-mono text-xs text-slate-400 dark:text-slate-500">
-                            — / {item.possible}
+                  return (
+                    <tr
+                      key={item.id}
+                      className={`hover:bg-white/40 dark:hover:bg-white/[0.03] transition-colors ${
+                        item.isRemoved ? 'opacity-45 bg-slate-100/50 dark:bg-slate-900/30' : ''
+                      }`}
+                    >
+                      <td className="py-3 px-4 sm:px-6 max-w-xs sm:max-w-md">
+                        <div className="min-w-0">
+                          <div
+                            className={`font-medium truncate ${
+                              item.isRemoved
+                                ? 'line-through text-slate-400'
+                                : 'text-slate-900 dark:text-white'
+                            }`}
+                          >
+                            {cleanTitle}
                           </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {isHypothetical && !item.isRemoved && (
-                      <div className="pt-1 space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5">
+                          {statusNote && (
+                            <div className="text-[11px] font-medium text-amber-700 dark:text-amber-400 mt-0.5">
+                              {statusNote}
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 sm:px-4 text-xs text-slate-600 dark:text-slate-400 truncate max-w-[140px]">
+                        {catName}
+                      </td>
+                      <td className="py-3 px-3 sm:px-4 text-xs font-mono text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                        {item.dueDate || '—'}
+                      </td>
+                      <td className="py-3 px-3 sm:px-4 text-right font-mono tabular-nums">
+                        {isHypothetical ? (
+                          <div className="flex items-center justify-end gap-1.5">
                             <input
                               type="number"
-                              step="any"
+                              step="0.1"
                               min={0}
+                              max={item.possible * 2}
+                              aria-label={`Hypothetical score for ${cleanTitle}`}
+                              value={item.earned !== null ? item.earned : ''}
                               placeholder="—"
-                              aria-label={`Hypothetical score for ${item.title}`}
-                              value={item.earned === null ? '' : item.earned}
                               onChange={(e) => {
-                                const raw = e.target.value;
-                                if (raw === '') {
-                                  onUpdateHypotheticalScore(course.id, item.id, null);
-                                } else {
-                                  const num = parseFloat(raw);
-                                  if (!Number.isNaN(num)) {
-                                    onUpdateHypotheticalScore(course.id, item.id, num);
-                                  }
-                                }
+                                const val =
+                                  e.target.value === '' ? null : parseFloat(e.target.value);
+                                onUpdateHypotheticalScore(course.id, item.id, val);
                               }}
-                              className={`w-20 px-2.5 py-1.5 text-right font-mono text-xs bg-white/85 dark:bg-slate-950/75 border rounded-lg tabular-nums focus:outline-none focus:ring-2 ${
-                                item.isModified
-                                  ? 'border-amber-400 text-amber-950 dark:text-amber-200 focus:border-amber-500 focus:ring-amber-400/30 font-medium'
-                                  : 'border-slate-300 dark:border-white/15 text-slate-900 dark:text-slate-100 focus:border-amber-500 focus:ring-amber-400/20'
-                              }`}
+                              className="w-16 px-2 py-1 text-xs text-right font-mono bg-white/90 dark:bg-slate-900 border border-amber-300/80 dark:border-amber-400/30 rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-amber-400/40"
                             />
-                            <span className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                              / {item.possible}
-                            </span>
+                            <span className="text-slate-400 text-xs">/ {item.possible}</span>
                           </div>
-                          {item.isModified && origPct !== null && pct !== null && Math.abs(pct - origPct) >= 0.05 && (
-                            <span className="font-mono text-[11px] text-amber-700 dark:text-amber-300 tabular-nums">
-                              was {formatPercent(origPct)}
-                            </span>
-                          )}
-                        </div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={sliderMax}
-                          step={item.possible <= 30 ? 0.5 : 1}
-                          value={item.earned ?? 0}
-                          aria-label={`Adjust hypothetical score slider for ${item.title}`}
-                          onChange={(e) =>
-                            onUpdateHypotheticalScore(
-                              course.id,
-                              item.id,
-                              parseFloat(e.target.value)
-                            )
-                          }
-                          className="grade-slider w-full"
-                        />
-                      </div>
-                    )}
-
-                    {/* Action Footer Row */}
-                    <div className="flex items-center justify-end gap-1 pt-0.5">
-                      {isHypothetical ? (
-                        item.isHypotheticalOnly ? (
-                          <button
-                            type="button"
-                            onClick={() => onRemoveHypotheticalAdded(course.id, item.id)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 rounded-lg"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            Remove
-                          </button>
                         ) : (
-                          <>
+                          <div>
+                            <span className="font-semibold text-slate-900 dark:text-white">
+                              {item.earned !== null ? item.earned : '—'}
+                            </span>
+                            <span className="text-slate-400 text-xs"> / {item.possible}</span>
+                            {pct !== null && (
+                              <span className={`block text-[11px] ${getGradeToneClass(pct)}`}>
+                                {pct.toFixed(1)}%
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 sm:px-6 text-right whitespace-nowrap">
+                        {isHypothetical ? (
+                          <div className="inline-flex items-center gap-1">
                             <button
                               type="button"
                               onClick={() => onToggleHypotheticalExclude(course.id, item.id)}
-                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg ${
+                              title={item.isRemoved ? 'Restore assignment' : 'Temporarily exclude'}
+                              className={`p-1.5 rounded-lg transition-colors ${
                                 item.isRemoved
-                                  ? 'text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-500/20'
-                                  : 'text-slate-500 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-white/10'
+                                  ? 'text-amber-600 bg-amber-500/10'
+                                  : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
                               }`}
                             >
-                              <EyeOff className="w-3.5 h-3.5" />
-                              {item.isRemoved ? 'Restore' : 'Exclude'}
+                              {item.isRemoved ? (
+                                <Check className="w-3.5 h-3.5" />
+                              ) : (
+                                <EyeOff className="w-3.5 h-3.5" />
+                              )}
                             </button>
                             {item.isModified && (
                               <button
                                 type="button"
                                 onClick={() => onResetHypotheticalItem(course.id, item.id)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-500/20 rounded-lg"
+                                title="Reset item to real grade"
+                                className="p-1.5 text-slate-400 hover:text-amber-600 rounded-lg transition-colors"
                               >
                                 <RotateCcw className="w-3.5 h-3.5" />
-                                Reset
                               </button>
-                            )}
-                          </>
-                        )
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => onEditRealAssignment(item)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-white/10 rounded-lg"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => onDeleteRealAssignment(item.id)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 rounded-lg"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            Delete
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* Desktop Ledger Table */}
-          <div className="hidden md:block overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200/70 dark:border-white/[0.08] bg-slate-50/50 dark:bg-white/[0.02] text-xs font-medium text-slate-500 dark:text-slate-400">
-                  <th className="py-3 px-5">Assignment</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Due Date</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">
-                    {isHypothetical ? 'Hypothetical Score' : 'Score'}
-                  </th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Percent</th>
-                  <th className="py-3 px-5 text-right whitespace-nowrap">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200/50 dark:divide-white/[0.06] text-sm">
-                {filteredAssignments.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="py-12 px-5 text-center text-sm text-slate-500 dark:text-slate-400"
-                    >
-                      {displayResult.effectiveAssignments.length === 0
-                        ? 'No assignments posted in this class yet.'
-                        : 'No assignments match the current filter.'}
-                    </td>
-                  </tr>
-                ) : (
-                  filteredAssignments.map((item, idx) => {
-                    const cat = categoryMap.get(item.categoryId);
-                    const displayTitle = cleanAssignmentDisplayTitle(item.title, cat?.name, idx);
-                    const pct =
-                      item.earned !== null && item.possible > 0 && !item.isRemoved && !item.excused
-                        ? (item.earned / item.possible) * 100
-                        : null;
-
-                    const origPct =
-                      item.originalEarned !== null && item.originalPossible > 0
-                        ? (item.originalEarned / item.originalPossible) * 100
-                        : null;
-
-                    const sliderMax = Math.max(item.possible, item.earned ?? 0);
-
-                    return (
-                      <tr
-                        key={item.id}
-                        className={`transition-colors ${
-                          item.isRemoved
-                            ? 'bg-slate-100/60 dark:bg-white/[0.02] opacity-55'
-                            : isHypothetical && item.isModified
-                              ? 'bg-amber-50/60 dark:bg-amber-500/10'
-                              : 'hover:bg-white/55 dark:hover:bg-white/[0.03]'
-                        }`}
-                      >
-                        <td className="py-3.5 px-5">
-                          <div
-                            className={`font-medium ${
-                              item.isRemoved || item.excused
-                                ? 'line-through text-slate-400 dark:text-slate-500'
-                                : 'text-slate-900 dark:text-slate-100'
-                            }`}
-                          >
-                            {displayTitle}
-                          </div>
-                          <div className="mt-0.5 text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 flex-wrap">
-                            <span>{cat?.name || 'Uncategorized'}</span>
-                            {item.extraCredit && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="text-emerald-700 dark:text-emerald-400 font-medium">
-                                  Extra Credit
-                                </span>
-                              </>
-                            )}
-                            {item.excused && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span>Excused</span>
-                              </>
-                            )}
-                            {item.isDropped && !item.isRemoved && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span>Dropped lowest</span>
-                              </>
                             )}
                             {item.isHypotheticalOnly && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="text-amber-700 dark:text-amber-400 font-medium">
-                                  Hypothetical addition
-                                </span>
-                              </>
-                            )}
-                            {item.isRemoved && (
-                              <>
-                                <span aria-hidden="true">·</span>
-                                <span className="text-amber-700 dark:text-amber-400 font-medium">
-                                  Excluded
-                                </span>
-                              </>
-                            )}
-                            {isHypothetical &&
-                              item.isModified &&
-                              !item.isHypotheticalOnly &&
-                              !item.isRemoved && (
-                                <>
-                                  <span aria-hidden="true">·</span>
-                                  <span className="text-amber-700 dark:text-amber-400 font-medium tabular-nums">
-                                    Actual:{' '}
-                                    {item.originalEarned === null
-                                      ? 'Ungraded'
-                                      : `${item.originalEarned}/${item.originalPossible}`}
-                                  </span>
-                                </>
-                              )}
-                          </div>
-                        </td>
-
-                        <td className="py-3.5 px-4 font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums whitespace-nowrap">
-                          {item.dueDate}
-                        </td>
-
-                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
-                          {isHypothetical && !item.isRemoved ? (
-                            <div className="inline-flex flex-col items-end gap-1.5">
-                              <div className="inline-flex items-center gap-1.5">
-                                <input
-                                  type="number"
-                                  step="any"
-                                  min={0}
-                                  placeholder="—"
-                                  aria-label={`Hypothetical score for ${item.title}`}
-                                  value={item.earned === null ? '' : item.earned}
-                                  onChange={(e) => {
-                                    const raw = e.target.value;
-                                    if (raw === '') {
-                                      onUpdateHypotheticalScore(course.id, item.id, null);
-                                    } else {
-                                      const num = parseFloat(raw);
-                                      if (!Number.isNaN(num)) {
-                                        onUpdateHypotheticalScore(course.id, item.id, num);
-                                      }
-                                    }
-                                  }}
-                                  className={`w-20 px-2 py-1 text-right font-mono text-xs bg-white/85 dark:bg-slate-950/75 border rounded-lg tabular-nums focus:outline-none focus:ring-2 ${
-                                    item.isModified
-                                      ? 'border-amber-400 text-amber-950 dark:text-amber-200 focus:border-amber-500 focus:ring-amber-400/30 font-medium'
-                                      : 'border-slate-300 dark:border-white/15 text-slate-900 dark:text-slate-100 focus:border-amber-500 focus:ring-amber-400/20'
-                                  }`}
-                                />
-                                <span className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                                  / {item.possible}
-                                </span>
-                              </div>
-                              <input
-                                type="range"
-                                min={0}
-                                max={sliderMax}
-                                step={item.possible <= 30 ? 0.5 : 1}
-                                value={item.earned ?? 0}
-                                aria-label={`Adjust hypothetical score slider for ${item.title}`}
-                                onChange={(e) =>
-                                  onUpdateHypotheticalScore(
-                                    course.id,
-                                    item.id,
-                                    parseFloat(e.target.value)
-                                  )
-                                }
-                                className="grade-slider w-28"
-                              />
-                            </div>
-                          ) : (
-                            <span className="font-mono text-xs text-slate-900 dark:text-slate-100 tabular-nums">
-                              {item.earned === null ? (
-                                <span className="text-slate-400 dark:text-slate-500">
-                                  Upcoming / {item.possible}
-                                </span>
-                              ) : (
-                                <>
-                                  <span className="font-medium">{item.earned}</span>
-                                  <span className="text-slate-400 dark:text-slate-500">
-                                    {' '}
-                                    / {item.possible}
-                                  </span>
-                                </>
-                              )}
-                            </span>
-                          )}
-                        </td>
-
-                        <td className="py-3.5 px-4 text-right font-mono text-xs tabular-nums whitespace-nowrap">
-                          {item.isRemoved ? (
-                            <span className="text-slate-400 dark:text-slate-500">Excluded</span>
-                          ) : pct !== null ? (
-                            <div>
-                              <div className={`font-semibold ${getGradeToneClass(pct)}`}>
-                                {formatPercent(pct)}
-                              </div>
-                              {isHypothetical &&
-                                item.isModified &&
-                                origPct !== null &&
-                                Math.abs(pct - origPct) >= 0.05 && (
-                                  <div className="text-[11px] text-slate-400 dark:text-slate-500">
-                                    was {formatPercent(origPct)}
-                                  </div>
-                                )}
-                            </div>
-                          ) : (
-                            <span className="text-slate-400 dark:text-slate-500">—</span>
-                          )}
-                        </td>
-
-                        <td className="py-3.5 px-5 text-right whitespace-nowrap">
-                          {isHypothetical ? (
-                            <div className="inline-flex items-center justify-end gap-1">
-                              {item.isHypotheticalOnly ? (
-                                <button
-                                  type="button"
-                                  onClick={() => onRemoveHypotheticalAdded(course.id, item.id)}
-                                  title="Remove hypothetical assignment"
-                                  className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg hover:bg-rose-500/10 transition-colors"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => onToggleHypotheticalExclude(course.id, item.id)}
-                                    title={
-                                      item.isRemoved
-                                        ? 'Restore assignment to simulation'
-                                        : 'Exclude assignment from simulation'
-                                    }
-                                    className={`p-1.5 rounded-lg transition-colors ${
-                                      item.isRemoved
-                                        ? 'text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-500/20'
-                                        : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-white/10'
-                                    }`}
-                                  >
-                                    <EyeOff className="w-3.5 h-3.5" />
-                                  </button>
-                                  {item.isModified && (
-                                    <button
-                                      type="button"
-                                      onClick={() => onResetHypotheticalItem(course.id, item.id)}
-                                      title="Reset to actual grade"
-                                      className="p-1.5 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-500/20 rounded-lg transition-colors"
-                                    >
-                                      <RotateCcw className="w-3.5 h-3.5" />
-                                    </button>
-                                  )}
-                                </>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="inline-flex items-center justify-end gap-1">
                               <button
                                 type="button"
-                                onClick={() => onEditRealAssignment(item)}
-                                title="Edit assignment"
-                                className="p-1.5 text-slate-400 hover:text-slate-800 dark:hover:text-slate-100 hover:bg-slate-200/60 dark:hover:bg-white/10 rounded-lg transition-colors"
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onDeleteRealAssignment(item.id)}
-                                title="Delete assignment"
-                                className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                                onClick={() => onRemoveHypotheticalAdded(course.id, item.id)}
+                                title="Delete hypothetical assignment"
+                                className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition-colors"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => onEditRealAssignment(item)}
+                              title="Edit assignment"
+                              className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg transition-colors"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteRealAssignment(item.id)}
+                              title="Delete assignment"
+                              className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
     </div>

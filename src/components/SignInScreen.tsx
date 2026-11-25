@@ -15,8 +15,11 @@ import { EdupointImportPayload, EdupointLoginPayload } from './EdupointModal';
 import {
   BiometricSupportInfo,
   SavedLoginSummary,
+  authenticateWithFingerprint,
   checkBiometricSupport,
+  clearSavedLogin,
   getSavedLoginSummary,
+  loadDecryptedLogin,
   registerFingerprintCredential,
   saveEncryptedLogin,
 } from '../utils/credentialVault';
@@ -30,6 +33,7 @@ interface SignInScreenProps {
   onSuccess: (payload: EdupointLoginPayload) => void;
   onImportSuccess: (payload: EdupointImportPayload) => void;
   onSavedLoginChange: (summary: SavedLoginSummary | null) => void;
+  savedLogin?: SavedLoginSummary | null;
 }
 
 const INPUT_CLASS =
@@ -53,6 +57,7 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({
   onSuccess,
   onImportSuccess,
   onSavedLoginChange,
+  savedLogin,
 }) => {
   const activeSchool = getSchoolOption(selectedSchool);
   const [mode, setMode] = useState<'login' | 'sso-import'>('login');
@@ -88,6 +93,79 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (savedLogin) {
+      setUsername(savedLogin.username);
+      if (savedLogin.districtUrl) {
+        setDistrictUrl(savedLogin.districtUrl);
+      }
+      setIsParent(savedLogin.isParent);
+    }
+  }, [savedLogin]);
+
+  const handleQuickSignIn = async () => {
+    setLoading(true);
+    setLoadingLabel('Signing In with Saved Device Data...');
+    setError(null);
+    try {
+      const creds = await loadDecryptedLogin();
+      if (!creds) {
+        setError('Saved login information could not be loaded. Please enter your password.');
+        setLoading(false);
+        return;
+      }
+      setUsername(creds.username);
+      setDistrictUrl(creds.districtUrl);
+      setIsParent(creds.isParent);
+      setPassword(creds.password);
+
+      const response = await fetch('/api/studentvue/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: creds.username,
+          password: creds.password,
+          isParent: creds.isParent,
+          districtUrl: creds.districtUrl,
+        }),
+      });
+
+      const data = await safeReadJson(response);
+      if (!response.ok || !data) {
+        setError(
+          typeof data?.error === 'string'
+            ? data.error
+            : 'Sign in failed. Please check your password.'
+        );
+        setLoading(false);
+        return;
+      }
+
+      onSuccess(data as unknown as EdupointLoginPayload);
+    } catch {
+      setError('Could not complete sign in.');
+      setLoading(false);
+    }
+  };
+
+  const handleFingerprintVerification = async () => {
+    setLoading(true);
+    setLoadingLabel('Confirming Fingerprint...');
+    setError(null);
+    try {
+      const bioRes = await authenticateWithFingerprint(savedLogin?.credentialId);
+      if (!bioRes.ok) {
+        setError(bioRes.error);
+        setLoading(false);
+        return;
+      }
+      await handleQuickSignIn();
+    } catch {
+      setError('Fingerprint verification failed.');
+      setLoading(false);
+    }
+  };
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -248,6 +326,59 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({
               upcoming assignments.
             </p>
           </div>
+
+          {/* Saved Account Quick Access / Verification Required Banner */}
+          {savedLogin && (
+            <div className="mb-5 p-4 rounded-xl bg-blue-50/90 dark:bg-sky-500/10 border border-blue-200 dark:border-sky-400/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-blue-600 dark:text-sky-400 shrink-0" />
+                  <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                    Saved Login Found on Device
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={async () => {
+                    await clearSavedLogin();
+                    onSavedLoginChange(null);
+                    setUsername('');
+                    setPassword('');
+                  }}
+                  className="text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:underline"
+                >
+                  Forget Saved Data
+                </button>
+              </div>
+              <div className="text-xs text-slate-700 dark:text-slate-300">
+                Auto-filled for <strong className="font-mono">{savedLogin.username}</strong>. Verify with fingerprint or 1-tap sign in below.
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                {savedLogin.biometricEnabled && biometricSupport.supported && (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={handleFingerprintVerification}
+                    className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-xl transition-colors shadow-xs whitespace-nowrap"
+                  >
+                    <Fingerprint className="w-4 h-4" />
+                    Verify Fingerprint
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleQuickSignIn}
+                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400 rounded-xl transition-colors shadow-xs whitespace-nowrap"
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
+                  Sign In Instantly
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Segmented Method Switch */}
           <div className="grid grid-cols-2 p-1 bg-slate-200/70 dark:bg-white/[0.06] border border-slate-300/60 dark:border-white/10 rounded-xl mb-5">
@@ -561,23 +692,20 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({
             </form>
           )}
 
-          {/* Clear Privacy Guarantee */}
+          {/* Explicit Privacy Guarantee */}
           <div className="mt-6 pt-5 border-t border-slate-200/70 dark:border-white/10 flex items-start gap-3">
             <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
             <div className="text-xs leading-relaxed text-slate-600 dark:text-slate-400">
               <span className="font-semibold text-slate-900 dark:text-slate-100">
-                Private to you only.
+                Passwords and grades are not stored or accessed by anybody but the user.
               </span>{' '}
-              Your password and grades are not shared with anybody but you. Credentials connect
-              directly to StudentVUE over HTTPS, and any saved login stays encrypted strictly on
-              your own device.
+              Your data remains 100% private. Credentials connect directly to StudentVUE over HTTPS, and any saved login stays encrypted strictly on your own device.
             </div>
           </div>
         </div>
 
         <p className="mt-5 text-center text-xs text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed">
-          Sign in or use a saved login on this device to view your grades. Without a saved
-          password, your grades clear automatically when you sign out or close this tab.
+          Sign in or use your saved login on this device to view your grades. Closing or reopening the website requires re-verification to protect your privacy.
         </p>
       </main>
     </div>

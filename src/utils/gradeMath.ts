@@ -630,16 +630,17 @@ export function looksLikeOpaqueId(raw: string): boolean {
   if (/^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i.test(s)) {
     return true;
   }
-  if (/^[0-9a-f]{12,}$/i.test(s) || /^\d+$/.test(s)) return true;
-  if (!/\s/.test(s) && s.length >= 12) {
-    if (/^[A-Za-z0-9+/]{16,}={0,2}$/.test(s) && /[0-9]/.test(s) && /[a-z]/.test(s) && /[A-Z]/.test(s)) {
+  if (/^[0-9a-f]{16,}$/i.test(s) || /^\d{7,}$/.test(s)) return true;
+  if (!/\s/.test(s) && s.length >= 22) {
+    if (
+      /^[A-Za-z0-9+/]{22,}={0,2}$/.test(s) &&
+      /[0-9]/.test(s) &&
+      /[a-z]/.test(s) &&
+      /[A-Z]/.test(s) &&
+      (/[+/=]/.test(s) || s.length >= 28)
+    ) {
       return true;
     }
-    let transitions = 0;
-    for (let i = 1; i < s.length; i++) {
-      if (/\d/.test(s[i - 1]) !== /\d/.test(s[i])) transitions += 1;
-    }
-    if (transitions >= 4) return true;
   }
   return false;
 }

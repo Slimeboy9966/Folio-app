@@ -1,29 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
-  Bookmark,
   BookOpen,
-  Calculator,
-  Check,
-  Fingerprint,
-  KeyRound,
-  LayoutGrid,
-  Link2,
-  Loader2,
-  LogOut,
   Mail,
-  Menu,
   Moon,
-  Plus,
-  RefreshCw,
-  RotateCcw,
   Search,
   Sliders,
-  SlidersHorizontal,
-  Sparkles,
   Sun,
-  Trash2,
-  X,
 } from 'lucide-react';
 import {
   AppNotification,
@@ -47,20 +30,13 @@ import {
   EMPTY_OVERLAY,
   computeCourseResult,
   computeTermSummary,
-  countOverlayChanges,
-  formatGpa,
-  formatPercent,
-  formatSignedDelta,
-  getGradeToneClass,
   makeAssignmentKey,
 } from './utils/gradeMath';
 import { OverviewView } from './components/OverviewView';
 import { CourseDetailView } from './components/CourseDetailView';
-import { TargetCalculatorView } from './components/TargetCalculatorView';
 import { GradeScaleView } from './components/GradeScaleView';
 import { NotificationsView } from './components/NotificationsView';
 import { SchoolEmailView } from './components/SchoolEmailView';
-import { AiAssistantDrawer } from './components/AiAssistantDrawer';
 import { QuickSearchModal } from './components/QuickSearchModal';
 import { AssignmentModal, CourseModal, NamePromptModal } from './components/Modals';
 import {
@@ -72,6 +48,7 @@ import { SignInScreen } from './components/SignInScreen';
 import {
   SavedLoginSummary,
   authenticateWithFingerprint,
+  clearSavedLogin,
   getSavedLoginSummary,
   loadDecryptedLogin,
 } from './utils/credentialVault';
@@ -84,15 +61,13 @@ import {
   sendBrowserNotification,
 } from './utils/notifications';
 import {
-  PUSD_SCHOOLS,
   PusdSchoolId,
   detectSchoolIdFromName,
   getSchoolOption,
 } from './utils/schools';
 import { GmailAccountInfo, subscribeGmailAuth } from './utils/gmailAuth';
-import { GmailMessageSummary } from './utils/gmailApi';
 
-type MainTab = 'overview' | 'course' | 'calculator' | 'email' | 'notifications' | 'scale';
+type MainTab = 'overview' | 'course' | 'email' | 'scale';
 type ThemeMode = 'dark' | 'light';
 
 const STORAGE_KEY_DATA = 'folio_gradebook_data_v1';
@@ -252,8 +227,21 @@ export default function App() {
   const [selectedSchool, setSelectedSchool] = useState<PusdSchoolId>(loadInitialSchool);
 
   const [activeTab, setActiveTab] = useState<MainTab>('overview');
+  const [mailSubTab, setMailSubTab] = useState<'gmail' | 'alerts'>('gmail');
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
+  const [showGpaOnOverview, setShowGpaOnOverview] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('folio_show_gpa_overview_v1') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('folio_show_gpa_overview_v1', String(showGpaOnOverview));
+    } catch {}
+  }, [showGpaOnOverview]);
 
   // Modals
   const [courseModalState, setCourseModalState] = useState<{
@@ -269,7 +257,6 @@ export default function App() {
 
   const [addTermModalOpen, setAddTermModalOpen] = useState(false);
   const [saveScenarioModalOpen, setSaveScenarioModalOpen] = useState(false);
-  const [confirmApplyOpen, setConfirmApplyOpen] = useState(false);
 
   // Edupoint StudentVUE live session (stored strictly in React memory, never localStorage)
   const [edupointSession, setEdupointSession] = useState<EdupointSessionInfo | null>(null);
@@ -293,24 +280,18 @@ export default function App() {
   const [lastMailCheck, setLastMailCheck] = useState<string | null>(null);
   const [mailCheckError, setMailCheckError] = useState<string | null>(null);
 
-  // AI Assistant, Quick Search (⌘K), and Study Checklist state
-  const [aiDrawerOpen, setAiDrawerOpen] = useState(false);
-  const [aiInitialPrompt, setAiInitialPrompt] = useState<string | null>(null);
+  // Quick Search (⌘K) state
   const [quickSearchOpen, setQuickSearchOpen] = useState(false);
   const [completedTaskIds, setCompletedTaskIds] = useState<Record<string, boolean>>({});
 
   // Opt-in School Email (Gmail) state — OAuth access token stays strictly in memory
   const [gmailAccount, setGmailAccount] = useState<GmailAccountInfo | null>(null);
   const [hasGmailToken, setHasGmailToken] = useState(false);
-  const [recentSchoolEmails, setRecentSchoolEmails] = useState<GmailMessageSummary[]>([]);
 
   useEffect(() => {
     const unsubscribe = subscribeGmailAuth((account, hasToken) => {
       setGmailAccount(account);
       setHasGmailToken(hasToken);
-      if (!account) {
-        setRecentSchoolEmails([]);
-      }
     });
     return unsubscribe;
   }, []);
@@ -458,21 +439,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [canAccessGrades]);
 
-  const handleAskAi = (prompt?: string) => {
-    if (prompt) {
-      setAiInitialPrompt(prompt);
-    }
-    setAiDrawerOpen(true);
-  };
-
-  const handleToggleTaskComplete = (taskKey: string) => {
-    setCompletedTaskIds((prev) => {
-      const next = { ...prev };
-      if (next[taskKey]) delete next[taskKey];
-      else next[taskKey] = true;
-      return next;
-    });
-  };
 
   const activeTerm =
     state.terms.find((t) => t.id === state.activeTermId) || state.terms[0] || null;
@@ -497,13 +463,13 @@ export default function App() {
   }, [termCourses, state.gradeScale]);
 
   const displayCourseResults = useMemo(() => {
-    if (!isHypothetical) return actualCourseResults;
+    if (!isHypothetical || activeTab !== 'course') return actualCourseResults;
     const map: Record<string, CourseResult> = {};
     for (const c of termCourses) {
       map[c.id] = computeCourseResult(c, state.gradeScale, overlay);
     }
     return map;
-  }, [termCourses, state.gradeScale, isHypothetical, overlay, actualCourseResults]);
+  }, [termCourses, state.gradeScale, isHypothetical, activeTab, overlay, actualCourseResults]);
 
   const actualSummary = useMemo(
     () =>
@@ -515,41 +481,6 @@ export default function App() {
         state.priorCredits
       ),
     [termCourses, state.gradeScale, state.priorGpa, state.priorCredits]
-  );
-
-  const displaySummary = useMemo(
-    () =>
-      isHypothetical
-        ? computeTermSummary(
-            termCourses,
-            state.gradeScale,
-            overlay,
-            state.priorGpa,
-            state.priorCredits
-          )
-        : actualSummary,
-    [
-      isHypothetical,
-      termCourses,
-      state.gradeScale,
-      overlay,
-      state.priorGpa,
-      state.priorCredits,
-      actualSummary,
-    ]
-  );
-
-  const totalHypotheticalChanges = useMemo(() => {
-    let count = 0;
-    for (const c of termCourses) {
-      count += countOverlayChanges(overlay, c.id);
-    }
-    return count;
-  }, [termCourses, overlay]);
-
-  const termAssignmentCount = useMemo(
-    () => termCourses.reduce((sum, c) => sum + c.assignments.length, 0),
-    [termCourses]
   );
 
   // Merge upcoming tests/quizzes/assignments, live sync events, and Synergy Mail
@@ -607,10 +538,12 @@ export default function App() {
   const handleSelectCourse = (courseId: string) => {
     setSelectedCourseId(courseId);
     setActiveTab('course');
-    setMobileSidebarOpen(false);
   };
 
   const handleNavClick = (tab: MainTab) => {
+    if (tab !== 'course') {
+      setIsHypothetical(false);
+    }
     if (tab === 'course') {
       const targetId = selectedCourse?.id || termCourses[0]?.id || null;
       if (targetId) {
@@ -622,7 +555,6 @@ export default function App() {
     } else {
       setActiveTab(tab);
     }
-    setMobileSidebarOpen(false);
   };
 
   /* ---------------- Real Data CRUD Handlers ---------------- */
@@ -850,9 +782,25 @@ export default function App() {
     setActiveTab('course');
   };
 
-  const handleResetAllHypothetical = () => {
-    setOverlay(EMPTY_OVERLAY);
-    setConfirmApplyOpen(false);
+  const handleResetCourseHypothetical = (courseId: string) => {
+    const prefix = `${courseId}::`;
+    setOverlay((prev) => {
+      const nextEdits: HypotheticalOverlay['edits'] = {};
+      for (const [k, v] of Object.entries(prev.edits)) {
+        if (!k.startsWith(prefix)) nextEdits[k] = v;
+      }
+      const nextRemoved: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(prev.removedAssignmentKeys)) {
+        if (!k.startsWith(prefix)) nextRemoved[k] = v;
+      }
+      const nextAdded = { ...prev.addedAssignments };
+      delete nextAdded[courseId];
+      return {
+        edits: nextEdits,
+        addedAssignments: nextAdded,
+        removedAssignmentKeys: nextRemoved,
+      };
+    });
   };
 
   const handleApplyHypotheticalToReal = () => {
@@ -882,13 +830,14 @@ export default function App() {
 
         return {
           ...course,
+          officialPercent: null,
+          officialLetter: null,
           assignments: [...updatedReal, ...addedReal],
         };
       }),
     }));
 
     setOverlay(EMPTY_OVERLAY);
-    setConfirmApplyOpen(false);
     setIsHypothetical(false);
   };
 
@@ -904,19 +853,6 @@ export default function App() {
       savedScenarios: [scenario, ...prev.savedScenarios],
     }));
     setSaveScenarioModalOpen(false);
-  };
-
-  const handleLoadScenario = (scenario: SavedScenario) => {
-    setOverlay(JSON.parse(JSON.stringify(scenario.overlay)));
-    setIsHypothetical(true);
-    setMobileSidebarOpen(false);
-  };
-
-  const handleDeleteScenario = (id: string) => {
-    setState((prev) => ({
-      ...prev,
-      savedScenarios: prev.savedScenarios.filter((s) => s.id !== id),
-    }));
   };
 
   /* ---------------- Settings & Import/Export Handlers ---------------- */
@@ -1276,7 +1212,6 @@ export default function App() {
       }
 
       handleEdupointLoginSuccess(data as unknown as EdupointLoginPayload);
-      setMobileSidebarOpen(false);
     } catch {
       setEdupointModalError('Network error while signing in to Edupoint.');
       setEdupointModalOpen(true);
@@ -1478,7 +1413,6 @@ export default function App() {
     setEdupointSession(null);
     setImportedInSession(false);
     setEdupointSyncError(null);
-    setAiDrawerOpen(false);
 
     if (!savedLogin) {
       setState(EMPTY_GRADEBOOK_STATE);
@@ -1503,460 +1437,47 @@ export default function App() {
     }
   };
 
-  /* ---------------- Primary Header CTA ---------------- */
-
-  const handleHeaderPrimaryCta = () => {
-    if (activeTab === 'course' && selectedCourse) {
-      setAssignmentModalState({
-        open: true,
-        courseId: selectedCourse.id,
-        editingAssignment: null,
-      });
-    } else {
-      setCourseModalState({ open: true, editingCourse: null });
+  const handleDeleteSavedLoginAndSignOut = async () => {
+    const token = edupointSession?.token;
+    await clearSavedLogin().catch(() => undefined);
+    wipeCachedGradebookStorage();
+    setSavedLogin(null);
+    setEdupointSession(null);
+    setImportedInSession(false);
+    setEdupointSyncError(null);
+    setState(EMPTY_GRADEBOOK_STATE);
+    setOverlay(EMPTY_OVERLAY);
+    setIsHypothetical(false);
+    setSelectedCourseId(null);
+    setMailMessages([]);
+    setSyncEventNotifications([]);
+    setCompletedTaskIds({});
+    setActiveTab('overview');
+    if (token) {
+      try {
+        await fetch('/api/studentvue/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch {
+        // Ignore network errors on logout
+      }
     }
   };
 
-  const sidebarContent = (
-    <div className="flex flex-col h-full">
-      {/* Edupoint StudentVUE Connection Panel */}
-      <div className="p-4 border-b border-slate-200/70 dark:border-white/10">
-        {edupointSession ? (
-          <div className="space-y-2.5">
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                  {edupointSession.studentInfo.name}
-                </div>
-                <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                  {edupointSession.studentInfo.school}
-                  {edupointSession.studentInfo.grade
-                    ? ` · Grade ${edupointSession.studentInfo.grade}`
-                    : ''}
-                </div>
-              </div>
-              <div className="flex items-center gap-0.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEdupointModalError(null);
-                    setEdupointModalOpen(true);
-                    setMobileSidebarOpen(false);
-                  }}
-                  title={
-                    savedLogin?.biometricEnabled
-                      ? 'Fingerprint sign-in active · Manage saved login'
-                      : 'Manage saved login & fingerprint sign-in'
-                  }
-                  aria-label="Manage saved login and fingerprint sign-in"
-                  className={`p-1 rounded-lg transition-colors ${
-                    savedLogin?.biometricEnabled
-                      ? 'text-blue-600 dark:text-sky-400 hover:bg-blue-500/10'
-                      : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <Fingerprint className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleDisconnectEdupoint}
-                  title="Sign out of Edupoint"
-                  aria-label="Sign out of Edupoint"
-                  className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 rounded-lg transition-colors"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-
-            {edupointSession.reportingPeriods.length > 0 && (
-              <div>
-                <label
-                  htmlFor="edupoint-period-select"
-                  className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1"
-                >
-                  Edupoint Grading Period
-                </label>
-                <select
-                  id="edupoint-period-select"
-                  disabled={isSyncingEdupoint}
-                  value={edupointSession.activePeriodIndex}
-                  onChange={(e) => handleSyncEdupoint(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs font-medium bg-white/80 dark:bg-slate-900/75 border border-slate-300/80 dark:border-white/15 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:focus:ring-sky-400/30 disabled:opacity-60"
-                >
-                  {edupointSession.reportingPeriods.map((rp) => (
-                    <option key={rp.index} value={rp.index} className="bg-white dark:bg-slate-900">
-                      {rp.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            <div className="text-[11px] font-mono text-slate-600 dark:text-slate-300 tabular-nums">
-              {termCourses.length} {termCourses.length === 1 ? 'course' : 'courses'} ·{' '}
-              {termAssignmentCount} {termAssignmentCount === 1 ? 'assignment' : 'assignments'}
-            </div>
-
-            <div className="flex items-center justify-between gap-2 pt-0.5">
-              <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                Synced{' '}
-                {new Date(edupointSession.syncedAt).toLocaleTimeString([], {
-                  hour: 'numeric',
-                  minute: '2-digit',
-                })}
-              </span>
-              <button
-                type="button"
-                disabled={isSyncingEdupoint}
-                onClick={() => handleSyncEdupoint()}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-blue-700 dark:text-sky-300 bg-white/75 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/10 hover:bg-white dark:hover:bg-white/[0.12] rounded-lg transition-colors disabled:opacity-50 whitespace-nowrap"
-              >
-                {isSyncingEdupoint ? (
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-3 h-3" />
-                )}
-                Sync Now
-              </button>
-            </div>
-
-            {edupointNotice && (
-              <div className="flex items-start justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-300 bg-slate-100/80 dark:bg-white/[0.05] border border-slate-200/80 dark:border-white/10 rounded-lg p-2">
-                <span>{edupointNotice}</span>
-                <button
-                  type="button"
-                  onClick={() => setEdupointNotice(null)}
-                  aria-label="Dismiss notice"
-                  className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 shrink-0"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              </div>
-            )}
-
-            {edupointSyncError && (
-              <div className="text-[11px] text-rose-700 dark:text-rose-400">{edupointSyncError}</div>
-            )}
-          </div>
-        ) : savedLogin ? (
-          <div className="space-y-2">
-            <div>
-              <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                {getSchoolOption(selectedSchool).shortName}
-              </div>
-              <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
-                Saved · {savedLogin.username}
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={isQuickSigningIn}
-              onClick={() => void handleQuickSignIn(savedLogin.biometricEnabled)}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400 rounded-xl transition-colors disabled:opacity-60 whitespace-nowrap"
-            >
-              {isQuickSigningIn ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : savedLogin.biometricEnabled ? (
-                <Fingerprint className="w-3.5 h-3.5" />
-              ) : (
-                <KeyRound className="w-3.5 h-3.5" />
-              )}
-              {isQuickSigningIn
-                ? 'Signing In...'
-                : savedLogin.biometricEnabled
-                  ? 'Fingerprint Sign In'
-                  : 'Quick Sign In'}
-            </button>
-            <button
-              type="button"
-              disabled={isQuickSigningIn}
-              onClick={() => {
-                setEdupointModalError(null);
-                setEdupointModalOpen(true);
-                setMobileSidebarOpen(false);
-              }}
-              className="w-full text-center text-[11px] font-medium text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 transition-colors disabled:opacity-50"
-            >
-              Manage Saved Login
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-2.5">
-            <div>
-              <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
-                {getSchoolOption(selectedSchool).shortName}
-              </div>
-              <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                Edupoint StudentVUE · PUSD
-              </div>
-            </div>
-            <div
-              role="group"
-              aria-label="Select school"
-              className="grid grid-cols-2 p-0.5 bg-slate-200/65 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/10 rounded-lg"
-            >
-              {PUSD_SCHOOLS.map((school) => (
-                <button
-                  key={school.id}
-                  type="button"
-                  onClick={() => setSelectedSchool(school.id)}
-                  className={`py-1 px-1.5 text-[11px] font-medium rounded-md transition-colors truncate ${
-                    selectedSchool === school.id
-                      ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                  }`}
-                >
-                  {school.id === 'amador-valley' ? 'Amador' : 'Foothill'}
-                </button>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setEdupointModalError(null);
-                setEdupointModalOpen(true);
-                setMobileSidebarOpen(false);
-              }}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400 rounded-xl transition-colors whitespace-nowrap"
-            >
-              <Link2 className="w-3.5 h-3.5" />
-              Connect Edupoint
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Term Selector */}
-      <div className="p-4 border-b border-slate-200/70 dark:border-white/10">
-        <div className="flex items-center justify-between mb-1.5">
-          <label
-            htmlFor="term-select"
-            className="text-xs font-medium text-slate-500 dark:text-slate-400"
-          >
-            Academic Term
-          </label>
-          <button
-            type="button"
-            onClick={() => setAddTermModalOpen(true)}
-            className="text-xs font-medium text-blue-700 dark:text-sky-400 hover:text-blue-900 dark:hover:text-sky-300 transition-colors"
-          >
-            + New
-          </button>
-        </div>
-        <select
-          id="term-select"
-          value={state.activeTermId}
-          onChange={(e) => {
-            const nextTermId = e.target.value;
-            setState((prev) => ({ ...prev, activeTermId: nextTermId }));
-            setSelectedCourseId(null);
-            if (activeTab === 'course') setActiveTab('overview');
-            // If connected to Edupoint and user selected an Edupoint period term, fetch live if empty
-            if (edupointSession && nextTermId.startsWith(`edupoint-${edupointSession.host}-`)) {
-              const periodIdx = nextTermId.replace(`edupoint-${edupointSession.host}-`, '');
-              const hasCourses = state.courses.some((c) => c.termId === nextTermId);
-              if (!hasCourses) {
-                void handleSyncEdupoint(periodIdx);
-              }
-            }
-          }}
-          className="w-full px-2.5 py-2 text-sm font-medium bg-white/80 dark:bg-slate-900/75 border border-slate-300/80 dark:border-white/15 rounded-xl text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:focus:ring-sky-400/30"
-        >
-          {state.terms.map((term) => (
-            <option key={term.id} value={term.id} className="bg-white dark:bg-slate-900">
-              {term.name}
-            </option>
-          ))}
-        </select>
-
-        {/* Compact Term GPA Readout */}
-        <div className="mt-3 flex items-baseline justify-between text-xs tabular-nums">
-          <span className="text-slate-500 dark:text-slate-400">
-            {isHypothetical ? 'Simulated GPA' : 'Term GPA'}
-          </span>
-          <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
-            {formatGpa(displaySummary.termGpa)}
-            {isHypothetical &&
-              actualSummary.termGpa !== null &&
-              displaySummary.termGpa !== null &&
-              Math.abs(displaySummary.termGpa - actualSummary.termGpa) >= 0.005 && (
-                <span
-                  className={`ml-1.5 font-medium ${
-                    displaySummary.termGpa > actualSummary.termGpa
-                      ? 'text-emerald-700 dark:text-emerald-400'
-                      : 'text-rose-700 dark:text-rose-400'
-                  }`}
-                >
-                  {formatSignedDelta(displaySummary.termGpa - actualSummary.termGpa, '', 2)}
-                </span>
-              )}
-          </span>
-        </div>
-      </div>
-
-      {/* Courses List */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-5">
-        <div>
-          <div className="px-2 mb-1.5 flex items-center justify-between">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Courses ({termCourses.length})
-            </span>
-            <button
-              type="button"
-              onClick={() => setCourseModalState({ open: true, editingCourse: null })}
-              aria-label="Add course"
-              className="p-1 text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 rounded-lg transition-colors"
-            >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <div className="space-y-1">
-            {termCourses.map((course) => {
-              const display = displayCourseResults[course.id];
-              const actual = actualCourseResults[course.id];
-              const isSelected = activeTab === 'course' && selectedCourse?.id === course.id;
-              const delta =
-                isHypothetical &&
-                actual?.percentage !== null &&
-                display?.percentage !== null
-                  ? display.percentage - actual.percentage
-                  : null;
-
-              return (
-                <button
-                  key={course.id}
-                  type="button"
-                  onClick={() => handleSelectCourse(course.id)}
-                  className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center justify-between gap-2 ${
-                    isSelected
-                      ? 'bg-slate-900 dark:bg-white/14 text-white border border-transparent dark:border-white/15 shadow-xs'
-                      : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/[0.06] border border-transparent'
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <div
-                      className={`font-mono text-[11px] leading-tight ${
-                        isSelected
-                          ? 'text-slate-300 dark:text-slate-300'
-                          : 'text-slate-500 dark:text-slate-400'
-                      }`}
-                    >
-                      {course.code}
-                    </div>
-                    <div className="text-xs font-medium truncate mt-0.5">{course.name}</div>
-                  </div>
-                  <div className="text-right shrink-0 tabular-nums">
-                    <div
-                      className={`font-mono text-xs font-semibold ${
-                        isSelected
-                          ? 'text-white'
-                          : getGradeToneClass(display?.percentage ?? null)
-                      }`}
-                    >
-                      {display?.letter ?? '—'}
-                    </div>
-                    <div
-                      className={`font-mono text-[11px] ${
-                        isSelected
-                          ? 'text-slate-300'
-                          : delta !== null && Math.abs(delta) >= 0.05
-                            ? delta > 0
-                              ? 'text-emerald-700 dark:text-emerald-400'
-                              : 'text-rose-700 dark:text-rose-400'
-                            : 'text-slate-500 dark:text-slate-400'
-                      }`}
-                    >
-                      {delta !== null && Math.abs(delta) >= 0.05
-                        ? formatSignedDelta(delta, '%', 1)
-                        : formatPercent(display?.percentage ?? null)}
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Saved Hypothetical Scenarios */}
-        {state.savedScenarios.length > 0 && (
-          <div className="pt-3 border-t border-slate-200/70 dark:border-white/10">
-            <div className="px-2 mb-1.5 text-xs font-medium text-slate-500 dark:text-slate-400">
-              Saved Scenarios
-            </div>
-            <div className="space-y-1">
-              {state.savedScenarios.map((scen) => (
-                <div
-                  key={scen.id}
-                  className="group flex items-center justify-between gap-1 px-2.5 py-1.5 rounded-xl hover:bg-amber-500/10 transition-colors"
-                >
-                  <button
-                    type="button"
-                    onClick={() => handleLoadScenario(scen)}
-                    className="min-w-0 flex-1 text-left"
-                  >
-                    <div className="text-xs font-medium text-slate-800 dark:text-slate-200 group-hover:text-amber-800 dark:group-hover:text-amber-300 truncate">
-                      {scen.name}
-                    </div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                      {countOverlayChanges(scen.overlay)} changes · {scen.createdAt}
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteScenario(scen.id)}
-                    aria-label={`Delete scenario ${scen.name}`}
-                    className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {/* School Email Quick Shortcut */}
-        <div className="pt-3 border-t border-slate-200/70 dark:border-white/10">
-          <button
-            type="button"
-            onClick={() => handleNavClick('email')}
-            className={`w-full text-left px-3 py-2.5 rounded-xl transition-colors flex items-center justify-between gap-2 ${
-              activeTab === 'email'
-                ? 'bg-slate-900 dark:bg-white/14 text-white border border-transparent dark:border-white/15 shadow-xs'
-                : 'text-slate-700 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/[0.06] border border-transparent'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Mail
-                className={`w-4 h-4 shrink-0 ${
-                  activeTab === 'email'
-                    ? 'text-sky-300'
-                    : hasGmailToken
-                      ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-blue-600 dark:text-sky-400'
-                }`}
-              />
-              <div className="min-w-0">
-                <div className="text-xs font-semibold truncate">School Email</div>
-                <div
-                  className={`text-[11px] truncate ${
-                    activeTab === 'email'
-                      ? 'text-slate-300'
-                      : 'text-slate-500 dark:text-slate-400'
-                  }`}
-                >
-                  {hasGmailToken && gmailAccount
-                    ? gmailAccount.email
-                    : 'Link Gmail & AI reply'}
-                </div>
-              </div>
-            </div>
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+  const handleSelectTerm = (nextTermId: string) => {
+    setState((prev) => ({ ...prev, activeTermId: nextTermId }));
+    setSelectedCourseId(null);
+    setIsHypothetical(false);
+    if (activeTab === 'course') setActiveTab('overview');
+    if (edupointSession && nextTermId.startsWith(`edupoint-${edupointSession.host}-`)) {
+      const periodIdx = nextTermId.replace(`edupoint-${edupointSession.host}-`, '');
+      const hasCourses = state.courses.some((c) => c.termId === nextTermId);
+      if (!hasCourses) {
+        void handleSyncEdupoint(periodIdx);
+      }
+    }
+  };
 
   if (!vaultChecked) {
     return <div className="min-h-screen folio-canvas" aria-busy="true" />;
@@ -1980,16 +1501,16 @@ export default function App() {
             wipeCachedGradebookStorage();
           }
         }}
+        savedLogin={savedLogin}
       />
     );
   }
 
   return (
     <div className="min-h-screen flex flex-col folio-canvas text-slate-900 dark:text-slate-100 transition-colors overflow-x-clip">
-      {/* Strict 3-Zone Top Bar Contract */}
+      {/* Minimal Top Bar */}
       <header className="sticky top-0 z-30 glass-bar">
-        <div className="max-w-[1440px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4 sm:gap-8">
-          {/* Zone 1: Single text element wordmark */}
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
           <button
             type="button"
             onClick={() => handleNavClick('overview')}
@@ -1998,561 +1519,297 @@ export default function App() {
             Folio
           </button>
 
-          {/* Zone 2: 4 clean single-line text navigation links */}
-          <nav
-            aria-label="Primary navigation"
-            className="hidden md:flex items-center gap-7 text-sm font-medium"
-          >
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => handleNavClick('overview')}
-              className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'overview'
-                  ? 'border-slate-900 dark:border-sky-400 text-slate-900 dark:text-white'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-              }`}
+              onClick={() => setQuickSearchOpen(true)}
+              aria-label="Quick search courses and assignments"
+              title="Quick search (Ctrl+K)"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/75 hover:bg-white dark:hover:bg-slate-800/85 border border-slate-200/80 dark:border-white/10 rounded-xl transition-colors whitespace-nowrap"
             >
-              Overview
+              <Search className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden sm:inline text-slate-500 dark:text-slate-400">Search</span>
+              <span className="hidden md:inline text-slate-400 dark:text-slate-500 font-mono text-[11px]">
+                ⌘K
+              </span>
             </button>
-            <button
-              type="button"
-              onClick={() => handleNavClick('course')}
-              className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'course'
-                  ? 'border-slate-900 dark:border-sky-400 text-slate-900 dark:text-white'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-              }`}
-            >
-              Course Ledger
-            </button>
-            <button
-              type="button"
-              onClick={() => handleNavClick('calculator')}
-              className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'calculator'
-                  ? 'border-slate-900 dark:border-sky-400 text-slate-900 dark:text-white'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-              }`}
-            >
-              Target Calculator
-            </button>
-            <button
-              type="button"
-              onClick={() => handleNavClick('email')}
-              className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'email'
-                  ? 'border-slate-900 dark:border-sky-400 text-slate-900 dark:text-white'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-              }`}
-            >
-              School Email
-            </button>
-            <button
-              type="button"
-              onClick={() => handleNavClick('scale')}
-              className={`py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-                activeTab === 'scale'
-                  ? 'border-slate-900 dark:border-sky-400 text-slate-900 dark:text-white'
-                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
-              }`}
-            >
-              Grading Scale
-            </button>
-          </nav>
 
-          {/* Zone 3: 1 primary CTA button */}
-          <div className="shrink-0">
             <button
               type="button"
-              onClick={handleHeaderPrimaryCta}
-              className="px-4 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 dark:bg-sky-500 dark:text-slate-950 dark:hover:bg-sky-400 rounded-xl transition-colors whitespace-nowrap shrink-0"
+              onClick={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+              aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/75 hover:bg-white dark:hover:bg-slate-800/85 border border-slate-200/80 dark:border-white/10 rounded-xl transition-colors whitespace-nowrap"
             >
-              {activeTab === 'course' && selectedCourse ? 'Add Assignment' : 'Add Course'}
+              {theme === 'dark' ? (
+                <>
+                  <Sun className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="hidden sm:inline">Light</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+                  <span className="hidden sm:inline">Dark</span>
+                </>
+              )}
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Workspace Canvas (Sidebar + Content) */}
-      <div className="flex-1 max-w-[1440px] w-full mx-auto flex">
-        {/* Desktop Sidebar */}
-        <aside className="hidden lg:block w-[268px] shrink-0 glass-sidebar">
-          <div className="sticky top-14 h-[calc(100vh-3.5rem)]">{sidebarContent}</div>
-        </aside>
-
-        {/* Mobile Drawer Sidebar */}
-        {mobileSidebarOpen && (
-          <div
-            className="fixed inset-0 z-40 lg:hidden bg-slate-950/60 backdrop-blur-xs"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setMobileSidebarOpen(false);
-            }}
-          >
-            <div className="w-72 max-w-[85vw] h-full glass-modal flex flex-col">
-              <div className="px-4 h-14 border-b border-slate-200/70 dark:border-white/10 flex items-center justify-between">
-                <span className="font-display font-bold text-slate-900 dark:text-white">
-                  Courses &amp; Terms
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setMobileSidebarOpen(false)}
-                  aria-label="Close sidebar"
-                  className="p-1.5 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-lg"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+      {/* Main Single-Column Workspace (No Sidebar) */}
+      <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 pt-5 pb-24 space-y-6">
+        {activeTab !== 'course' && (
+          <div className="flex flex-wrap items-end justify-between gap-3 pb-3 border-b border-slate-200/70 dark:border-white/10">
+            <div className="min-w-0">
+              <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                {activeTerm?.name || 'Academic Term'}
               </div>
-              <div className="px-4 py-2.5 border-b border-slate-200/70 dark:border-white/10 flex flex-wrap gap-1.5 md:hidden">
-                {(
-                  [
-                    ['overview', 'Overview'],
-                    ['course', 'Courses'],
-                    ['email', 'School Email'],
-                    ['calculator', 'Target'],
-                    ['notifications', unreadNotificationCount > 0 ? `Alerts (${unreadNotificationCount})` : 'Alerts'],
-                    ['scale', 'Scale'],
-                  ] as const
-                ).map(([key, label]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => handleNavClick(key)}
-                    className={`px-2.5 py-1.5 text-xs font-medium rounded-lg ${
-                      activeTab === key
-                        ? 'bg-slate-900 dark:bg-sky-500 text-white dark:text-slate-950'
-                        : 'text-slate-600 dark:text-slate-300 bg-slate-200/60 dark:bg-white/[0.06]'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <div className="flex-1 overflow-hidden">{sidebarContent}</div>
-            </div>
-          </div>
-        )}
-
-        {/* Main Viewport */}
-        <main className="flex-1 min-w-0 px-4 sm:px-8 pt-5 pb-24 md:py-6 space-y-6">
-          {/* Workspace Toolbar: Contextual Title + Mode Switch + Alerts + Theme Toggle */}
-          <div className="flex flex-wrap items-center justify-between gap-3 sm:gap-4 pb-4 border-b border-slate-200/70 dark:border-white/10">
-            <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
-              <button
-                type="button"
-                onClick={() => setMobileSidebarOpen(true)}
-                aria-label="Open courses menu"
-                className="lg:hidden p-2 -ml-2 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-white/60 dark:hover:bg-white/10 shrink-0"
-              >
-                <Menu className="w-5 h-5" />
-              </button>
-              <div className="min-w-0">
-                <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-1.5 truncate">
-                  <span className="truncate">{activeTerm?.name || 'Academic Term'}</span>
-                  <span aria-hidden="true">/</span>
-                  <span className="shrink-0">
-                    {activeTab === 'overview' && 'Overview'}
-                    {activeTab === 'course' && (selectedCourse?.code || 'Course Ledger')}
-                    {activeTab === 'calculator' && 'Target Calculator'}
-                    {activeTab === 'email' && 'School Email'}
-                    {activeTab === 'notifications' && 'Alerts & Mail'}
-                    {activeTab === 'scale' && 'Grading Scale'}
-                  </span>
-                </div>
-                {activeTab !== 'course' && (
-                  <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white truncate mt-0.5">
-                    {activeTab === 'overview' && `${activeTerm?.name || ''} Gradebook`}
-                    {activeTab === 'calculator' && 'Target Grade & GPA Calculator'}
-                    {activeTab === 'email' && 'School Email & AI Formatter'}
-                    {activeTab === 'notifications' && 'Notifications & Synergy Mail'}
-                    {activeTab === 'scale' && 'Grading Scale & Preferences'}
-                  </h1>
-                )}
-              </div>
+              <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white truncate mt-0.5">
+                {activeTab === 'overview' && 'Grades'}
+                {activeTab === 'email' && 'Mail & Alerts'}
+                {activeTab === 'scale' && 'Settings'}
+              </h1>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 w-full sm:w-auto justify-between sm:justify-end">
-              {/* Interactive Actual / Hypothetical Mode Switch */}
+            {activeTab === 'email' && (
               <div
-                role="group"
-                aria-label="Grade viewing mode"
+                role="tablist"
+                aria-label="Mail view"
                 className="inline-flex items-center p-1 bg-white/80 dark:bg-slate-900/75 border border-slate-200/80 dark:border-white/10 rounded-xl shrink-0"
               >
                 <button
                   type="button"
-                  aria-pressed={!isHypothetical}
-                  onClick={() => {
-                    setIsHypothetical(false);
-                    setConfirmApplyOpen(false);
-                  }}
-                  className={`px-2.5 sm:px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                    !isHypothetical
-                      ? 'bg-slate-900 text-white dark:bg-white/15 dark:text-white shadow-xs'
+                  role="tab"
+                  aria-selected={mailSubTab === 'gmail'}
+                  onClick={() => setMailSubTab('gmail')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                    mailSubTab === 'gmail'
+                      ? 'bg-slate-900 text-white dark:bg-sky-500 dark:text-slate-950 shadow-xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                   }`}
                 >
-                  <span className="sm:hidden">Actual</span>
-                  <span className="hidden sm:inline">Actual Grades</span>
+                  <Mail className="w-3.5 h-3.5 shrink-0" />
+                  School Email
                 </button>
                 <button
                   type="button"
-                  aria-pressed={isHypothetical}
-                  onClick={() => setIsHypothetical(true)}
-                  className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
-                    isHypothetical
-                      ? 'bg-amber-600 dark:bg-amber-500 text-white dark:text-slate-950 shadow-xs'
+                  role="tab"
+                  aria-selected={mailSubTab === 'alerts'}
+                  onClick={() => setMailSubTab('alerts')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                    mailSubTab === 'alerts'
+                      ? 'bg-slate-900 text-white dark:bg-sky-500 dark:text-slate-950 shadow-xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                  }`}
-                >
-                  <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
-                  <span className="sm:hidden">What-If</span>
-                  <span className="hidden sm:inline">Hypothetical Mode</span>
-                  {totalHypotheticalChanges > 0 && (
-                    <span
-                      className={`font-mono text-[11px] tabular-nums ${
-                        isHypothetical
-                          ? 'text-amber-100 dark:text-slate-900 font-semibold'
-                          : 'text-amber-700 dark:text-amber-400 font-semibold'
-                      }`}
-                    >
-                      ({totalHypotheticalChanges})
-                    </span>
-                  )}
-                </button>
-              </div>
-
-              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                {/* Quick Search (Cmd/Ctrl+K) */}
-                <button
-                  type="button"
-                  onClick={() => setQuickSearchOpen(true)}
-                  aria-label="Quick search courses and assignments"
-                  title="Quick search (Ctrl+K)"
-                  className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/75 hover:bg-white dark:hover:bg-slate-800/85 border border-slate-200/80 dark:border-white/10 rounded-xl transition-colors whitespace-nowrap"
-                >
-                  <Search className="w-3.5 h-3.5 shrink-0" />
-                  <span className="hidden md:inline text-slate-400 dark:text-slate-500 font-mono text-[11px]">
-                    ⌘K
-                  </span>
-                </button>
-
-                {/* Folio AI Academic Assistant Button */}
-                <button
-                  type="button"
-                  onClick={() => handleAskAi()}
-                  aria-label="Open Folio AI Assistant"
-                  title="Ask Folio AI Coach"
-                  className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 text-xs font-medium text-blue-700 dark:text-sky-300 bg-blue-50/90 dark:bg-sky-500/15 hover:bg-blue-100/95 dark:hover:bg-sky-500/25 border border-blue-200/80 dark:border-sky-400/30 rounded-xl transition-colors whitespace-nowrap"
-                >
-                  <Sparkles className="w-3.5 h-3.5 shrink-0" />
-                  <span className="hidden sm:inline">AI Coach</span>
-                </button>
-
-                {/* Alerts & Synergy Mail Button */}
-                <button
-                  type="button"
-                  onClick={() => handleNavClick('notifications')}
-                  aria-label={
-                    unreadNotificationCount > 0
-                      ? `Notifications and Mail (${unreadNotificationCount} unread)`
-                      : 'Notifications and Mail'
-                  }
-                  className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 text-xs font-medium border rounded-xl transition-colors whitespace-nowrap ${
-                    activeTab === 'notifications'
-                      ? 'bg-slate-900 dark:bg-sky-500 text-white dark:text-slate-950 border-slate-900 dark:border-sky-500'
-                      : 'text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/75 hover:bg-white dark:hover:bg-slate-800/85 border-slate-200/80 dark:border-white/10'
                   }`}
                 >
                   <Bell className="w-3.5 h-3.5 shrink-0" />
-                  <span className="hidden sm:inline">Alerts</span>
+                  Synergy &amp; Alerts
                   {unreadNotificationCount > 0 && (
                     <span
                       className={`font-mono text-[11px] font-semibold tabular-nums ${
-                        activeTab === 'notifications'
+                        mailSubTab === 'alerts'
                           ? 'text-sky-200 dark:text-slate-900'
                           : 'text-blue-700 dark:text-sky-400'
                       }`}
                     >
-                      {unreadNotificationCount}
+                      ({unreadNotificationCount})
                     </span>
                   )}
                 </button>
-
-                {/* Clean Light / Dark Theme Switch */}
-                <button
-                  type="button"
-                  onClick={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
-                  aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                  title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-                  className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white/80 dark:bg-slate-900/75 hover:bg-white dark:hover:bg-slate-800/85 border border-slate-200/80 dark:border-white/10 rounded-xl transition-colors whitespace-nowrap"
-                >
-                  {theme === 'dark' ? (
-                    <>
-                      <Sun className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span className="hidden sm:inline">Light</span>
-                    </>
-                  ) : (
-                    <>
-                      <Moon className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-                      <span className="hidden sm:inline">Dark</span>
-                    </>
-                  )}
-                </button>
               </div>
-            </div>
+            )}
           </div>
+        )}
 
-          {/* Active Hypothetical Sandbox Banner */}
-          {isHypothetical && (
-            <div className="glass-hypothetical rounded-2xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
-              <div className="text-xs text-amber-950 dark:text-amber-100">
-                <span className="font-semibold">Hypothetical Mode active</span>
-                <span aria-hidden="true" className="mx-2 text-amber-600 dark:text-amber-400">
-                  ·
-                </span>
-                <span className="text-amber-900 dark:text-amber-200/90">
-                  {totalHypotheticalChanges === 0
-                    ? 'Adjust any assignment score or plug in upcoming exam scores — your real grades remain untouched.'
-                    : `${totalHypotheticalChanges} simulated ${
-                        totalHypotheticalChanges === 1 ? 'change' : 'changes'
-                      } active. Real grades remain untouched until applied.`}
-                </span>
-              </div>
+        {/* Active View */}
+        {activeTab === 'overview' && (
+          <OverviewView
+            courses={termCourses}
+            actualCourseResults={actualCourseResults}
+            actualSummary={actualSummary}
+            terms={state.terms}
+            activeTermId={state.activeTermId}
+            edupointSession={edupointSession}
+            savedLogin={savedLogin}
+            isSyncingEdupoint={isSyncingEdupoint}
+            isQuickSigningIn={isQuickSigningIn}
+            edupointSyncError={edupointSyncError}
+            edupointNotice={edupointNotice}
+            schoolName={getSchoolOption(selectedSchool).name}
+            showGpaOnOverview={showGpaOnOverview}
+            onSelectTerm={handleSelectTerm}
+            onSyncEdupoint={(rp) => void handleSyncEdupoint(rp)}
+            onQuickSignIn={(useFp) => void handleQuickSignIn(useFp)}
+            onOpenEdupointModal={() => {
+              setEdupointModalError(null);
+              setEdupointModalOpen(true);
+            }}
+            onOpenAddCourse={() => setCourseModalState({ open: true, editingCourse: null })}
+            onOpenAddTerm={() => setAddTermModalOpen(true)}
+            onSelectCourse={handleSelectCourse}
+          />
+        )}
 
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {totalHypotheticalChanges > 0 && !confirmApplyOpen && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => setSaveScenarioModalOpen(true)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-900 dark:text-amber-200 bg-white/80 dark:bg-white/10 hover:bg-white dark:hover:bg-white/15 border border-amber-300/80 dark:border-amber-400/25 rounded-lg transition-colors whitespace-nowrap"
-                    >
-                      <Bookmark className="w-3.5 h-3.5" />
-                      Save Scenario
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleResetAllHypothetical}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-900 dark:text-amber-200 bg-white/80 dark:bg-white/10 hover:bg-white dark:hover:bg-white/15 border border-amber-300/80 dark:border-amber-400/25 rounded-lg transition-colors whitespace-nowrap"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      Reset Changes
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmApplyOpen(true)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white dark:text-slate-950 bg-amber-700 hover:bg-amber-800 dark:bg-amber-400 dark:hover:bg-amber-300 rounded-lg transition-colors whitespace-nowrap"
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                      Apply to Real Grades
-                    </button>
-                  </>
-                )}
+        {activeTab === 'course' && selectedCourse && (
+          <CourseDetailView
+            course={selectedCourse}
+            actualResult={actualCourseResults[selectedCourse.id]}
+            displayResult={displayCourseResults[selectedCourse.id]}
+            gradeScale={state.gradeScale}
+            isHypothetical={isHypothetical}
+            overlay={overlay}
+            onBack={() => {
+              setIsHypothetical(false);
+              setActiveTab('overview');
+              setSelectedCourseId(null);
+            }}
+            onEditCourse={() =>
+              setCourseModalState({ open: true, editingCourse: selectedCourse })
+            }
+            onAddAssignment={() =>
+              setAssignmentModalState({
+                open: true,
+                courseId: selectedCourse.id,
+                editingAssignment: null,
+              })
+            }
+            onEditRealAssignment={(assignment) =>
+              setAssignmentModalState({
+                open: true,
+                courseId: selectedCourse.id,
+                editingAssignment: assignment,
+              })
+            }
+            onDeleteRealAssignment={(assignmentId) =>
+              handleDeleteRealAssignment(selectedCourse.id, assignmentId)
+            }
+            onUpdateHypotheticalScore={handleUpdateHypotheticalScore}
+            onToggleHypotheticalExclude={handleToggleHypotheticalExclude}
+            onResetHypotheticalItem={handleResetHypotheticalItem}
+            onRemoveHypotheticalAdded={handleRemoveHypotheticalAdded}
+            onResetCourseHypothetical={handleResetCourseHypothetical}
+            onSaveScenario={() => setSaveScenarioModalOpen(true)}
+            onApplyHypothetical={handleApplyHypotheticalToReal}
+            onSimulateTargetScore={handleSimulateTargetScore}
+            onSetHypothetical={setIsHypothetical}
+          />
+        )}
 
-                {confirmApplyOpen && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-amber-950 dark:text-amber-100">
-                      Save simulated edits permanently?
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setConfirmApplyOpen(false)}
-                      className="px-2.5 py-1 text-xs font-medium text-amber-900 dark:text-amber-200 hover:underline"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleApplyHypotheticalToReal}
-                      className="px-3 py-1.5 text-xs font-medium text-white dark:text-slate-950 bg-amber-700 hover:bg-amber-800 dark:bg-amber-400 dark:hover:bg-amber-300 rounded-lg whitespace-nowrap"
-                    >
-                      Confirm Apply
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
+        {activeTab === 'email' && mailSubTab === 'gmail' && (
+          <SchoolEmailView
+            gmailAccount={gmailAccount}
+            hasGmailToken={hasGmailToken}
+            onGmailAuthSuccess={(account) => {
+              setGmailAccount(account);
+              setHasGmailToken(true);
+            }}
+            onGmailSignOut={() => {
+              setHasGmailToken(false);
+            }}
+            studentName={edupointSession?.studentInfo.name}
+            schoolName={getSchoolOption(selectedSchool).name}
+          />
+        )}
 
-          {/* Active View */}
-          {activeTab === 'overview' && (
-            <OverviewView
-              courses={termCourses}
-              allYearCourses={state.courses}
-              actualCourseResults={actualCourseResults}
-              displayCourseResults={displayCourseResults}
-              actualSummary={actualSummary}
-              displaySummary={displaySummary}
-              isHypothetical={isHypothetical}
-              gradeScale={state.gradeScale}
-              overlay={overlay}
-              priorGpa={state.priorGpa}
-              priorCredits={state.priorCredits}
-              edupointSession={edupointSession}
-              schoolName={getSchoolOption(selectedSchool).name}
-              onOpenEdupointModal={() => setEdupointModalOpen(true)}
-              onSelectCourse={handleSelectCourse}
-              onEnableHypothetical={() => setIsHypothetical(true)}
-              onUpdateHypotheticalScore={handleUpdateHypotheticalScore}
-              onResetHypotheticalItem={handleResetHypotheticalItem}
-              onOpenAddCourse={() => setCourseModalState({ open: true, editingCourse: null })}
-              onAskAi={handleAskAi}
-              completedTaskIds={completedTaskIds}
-              onToggleTaskComplete={handleToggleTaskComplete}
-            />
-          )}
+        {activeTab === 'email' && mailSubTab === 'alerts' && (
+          <NotificationsView
+            notifications={allNotifications}
+            prefs={notifPrefs}
+            edupointSession={edupointSession}
+            isCheckingMail={isCheckingMail}
+            lastMailCheck={lastMailCheck}
+            mailCheckError={mailCheckError}
+            onUpdatePrefs={setNotifPrefs}
+            onMarkRead={handleMarkNotifRead}
+            onMarkAllRead={handleMarkAllNotifRead}
+            onDismiss={handleDismissNotif}
+            onClearDismissed={handleClearDismissedNotifs}
+            hasDismissed={hasDismissedNotifications}
+            onSelectCourse={handleSelectCourse}
+            onRefreshMail={() => void handleRefreshMail()}
+            onOpenEdupointModal={() => {
+              setEdupointModalError(null);
+              setEdupointModalOpen(true);
+            }}
+          />
+        )}
 
-          {activeTab === 'course' && selectedCourse && (
-            <CourseDetailView
-              course={selectedCourse}
-              actualResult={actualCourseResults[selectedCourse.id]}
-              displayResult={displayCourseResults[selectedCourse.id]}
-              gradeScale={state.gradeScale}
-              isHypothetical={isHypothetical}
-              overlay={overlay}
-              onBack={() => setActiveTab('overview')}
-              onEditCourse={() =>
-                setCourseModalState({ open: true, editingCourse: selectedCourse })
-              }
-              onAddAssignment={() =>
-                setAssignmentModalState({
-                  open: true,
-                  courseId: selectedCourse.id,
-                  editingAssignment: null,
-                })
-              }
-              onEditRealAssignment={(assignment) =>
-                setAssignmentModalState({
-                  open: true,
-                  courseId: selectedCourse.id,
-                  editingAssignment: assignment,
-                })
-              }
-              onDeleteRealAssignment={(assignmentId) =>
-                handleDeleteRealAssignment(selectedCourse.id, assignmentId)
-              }
-              onUpdateHypotheticalScore={handleUpdateHypotheticalScore}
-              onToggleHypotheticalExclude={handleToggleHypotheticalExclude}
-              onResetHypotheticalItem={handleResetHypotheticalItem}
-              onRemoveHypotheticalAdded={handleRemoveHypotheticalAdded}
-              onFillUngraded={handleFillUngraded}
-              onSimulateTargetScore={handleSimulateTargetScore}
-            />
-          )}
+        {activeTab === 'scale' && (
+          <GradeScaleView
+            gradeScale={state.gradeScale}
+            priorGpa={state.priorGpa}
+            priorCredits={state.priorCredits}
+            showGpaOnOverview={showGpaOnOverview}
+            theme={theme}
+            selectedSchool={selectedSchool}
+            edupointSession={edupointSession}
+            savedLogin={savedLogin}
+            isSyncingEdupoint={isSyncingEdupoint}
+            notifPrefs={notifPrefs}
+            onSelectSchool={setSelectedSchool}
+            onSyncEdupoint={() => void handleSyncEdupoint()}
+            onOpenEdupointModal={() => {
+              setEdupointModalError(null);
+              setEdupointModalOpen(true);
+            }}
+            onSignOut={() => void handleDisconnectEdupoint()}
+            onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+            onUpdateNotifPrefs={setNotifPrefs}
+            onDeleteSavedLogin={() => void handleDeleteSavedLoginAndSignOut()}
+            onUpdateGradeScale={handleUpdateGradeScale}
+            onUpdatePriorRecord={handleUpdatePriorRecord}
+            onToggleShowGpaOnOverview={setShowGpaOnOverview}
+            onExportJson={handleExportJson}
+            onImportJson={handleImportJson}
+            onClearAllData={handleClearAllData}
+          />
+        )}
+      </main>
 
-          {activeTab === 'calculator' && (
-            <TargetCalculatorView
-              courses={termCourses}
-              actualCourseResults={actualCourseResults}
-              displayCourseResults={displayCourseResults}
-              gradeScale={state.gradeScale}
-              priorGpa={state.priorGpa}
-              priorCredits={state.priorCredits}
-              isHypothetical={isHypothetical}
-              overlay={overlay}
-              onSimulateTargetScore={handleSimulateTargetScore}
-              onSelectCourse={handleSelectCourse}
-            />
-          )}
-
-          {activeTab === 'email' && (
-            <SchoolEmailView
-              gmailAccount={gmailAccount}
-              hasGmailToken={hasGmailToken}
-              onGmailAuthSuccess={(account) => {
-                setGmailAccount(account);
-                setHasGmailToken(true);
-              }}
-              onGmailSignOut={() => {
-                setHasGmailToken(false);
-                setRecentSchoolEmails([]);
-              }}
-              onMessagesLoaded={setRecentSchoolEmails}
-              studentName={edupointSession?.studentInfo.name}
-              schoolName={getSchoolOption(selectedSchool).name}
-              onAskAiWithEmail={(prompt) => handleAskAi(prompt)}
-            />
-          )}
-
-          {activeTab === 'notifications' && (
-            <NotificationsView
-              notifications={allNotifications}
-              prefs={notifPrefs}
-              edupointSession={edupointSession}
-              isCheckingMail={isCheckingMail}
-              lastMailCheck={lastMailCheck}
-              mailCheckError={mailCheckError}
-              onUpdatePrefs={setNotifPrefs}
-              onMarkRead={handleMarkNotifRead}
-              onMarkAllRead={handleMarkAllNotifRead}
-              onDismiss={handleDismissNotif}
-              onClearDismissed={handleClearDismissedNotifs}
-              hasDismissed={hasDismissedNotifications}
-              onSelectCourse={handleSelectCourse}
-              onRefreshMail={() => void handleRefreshMail()}
-              onOpenEdupointModal={() => setEdupointModalOpen(true)}
-            />
-          )}
-
-          {activeTab === 'scale' && (
-            <GradeScaleView
-              gradeScale={state.gradeScale}
-              priorGpa={state.priorGpa}
-              priorCredits={state.priorCredits}
-              onUpdateGradeScale={handleUpdateGradeScale}
-              onUpdatePriorRecord={handleUpdatePriorRecord}
-              onExportJson={handleExportJson}
-              onImportJson={handleImportJson}
-              onResetSampleData={handleResetSampleData}
-              onClearAllData={handleClearAllData}
-            />
-          )}
-        </main>
-      </div>
-
-      {/* Mobile Bottom Navigation Bar (<= 15% total sticky height with header) */}
+      {/* Universal 3-Button Bottom Navigation Bar (Mail, Grades, Settings) */}
       <nav
-        aria-label="Mobile navigation"
-        className="md:hidden fixed bottom-0 inset-x-0 z-30 glass-bar border-t border-slate-200/70 dark:border-white/10 h-14 px-1"
+        aria-label="Primary navigation"
+        className="fixed bottom-0 inset-x-0 z-30 glass-bar border-t border-slate-200/70 dark:border-white/10 h-16 px-4"
       >
-        <div className="grid grid-cols-6 h-full max-w-lg mx-auto">
+        <div className="grid grid-cols-3 h-full max-w-md mx-auto">
           {(
             [
-              { key: 'overview', label: 'Overview', icon: LayoutGrid },
-              { key: 'course', label: 'Courses', icon: BookOpen },
-              { key: 'ai', label: 'AI', icon: Sparkles },
-              { key: 'email', label: 'Email', icon: Mail },
-              { key: 'notifications', label: 'Alerts', icon: Bell },
-              { key: 'calculator', label: 'Target', icon: Calculator },
+              { key: 'email', label: 'Mail', icon: Mail },
+              { key: 'overview', label: 'Grades', icon: BookOpen },
+              { key: 'scale', label: 'Settings', icon: Sliders },
             ] as const
           ).map(({ key, label, icon: Icon }) => {
-            const isActive = key === 'ai' ? aiDrawerOpen : !aiDrawerOpen && activeTab === key;
+            const isActive = activeTab === key || (key === 'overview' && activeTab === 'course');
             return (
               <button
                 key={key}
                 type="button"
-                onClick={() => {
-                  if (key === 'ai') {
-                    setAiDrawerOpen((prev) => !prev);
-                  } else {
-                    setAiDrawerOpen(false);
-                    handleNavClick(key);
-                  }
-                }}
-                className={`relative flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors px-0.5 ${
+                onClick={() => handleNavClick(key)}
+                className={`relative flex flex-col items-center justify-center gap-1 text-xs font-medium transition-colors px-2 cursor-pointer ${
                   isActive
                     ? 'text-blue-700 dark:text-sky-400'
                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
+                {isActive && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute top-0 left-1/2 -translate-x-1/2 w-10 h-0.5 rounded-full bg-blue-600 dark:bg-sky-400"
+                  />
+                )}
                 <span className="relative">
-                  <Icon className="w-4 h-4" />
-                  {key === 'notifications' && unreadNotificationCount > 0 && (
-                    <span className="absolute -top-1.5 -right-2.5 min-w-[15px] h-3.5 px-1 rounded-full bg-blue-600 dark:bg-sky-500 text-white dark:text-slate-950 font-mono text-[9px] font-bold leading-[14px] text-center tabular-nums">
+                  <Icon className="w-5 h-5" />
+                  {key === 'email' && unreadNotificationCount > 0 && (
+                    <span
+                      aria-label={`${unreadNotificationCount} unread alerts`}
+                      className="absolute -top-1 -right-2 min-w-[16px] h-4 px-1 flex items-center justify-center rounded-full bg-blue-600 dark:bg-sky-400 text-white dark:text-slate-950 font-mono text-[10px] font-bold leading-none tabular-nums"
+                    >
                       {unreadNotificationCount > 9 ? '9+' : unreadNotificationCount}
                     </span>
                   )}
                 </span>
-                <span className="leading-none truncate max-w-full">{label}</span>
+                <span className="leading-none">{label}</span>
               </button>
             );
           })}
@@ -2650,27 +1907,22 @@ export default function App() {
         <QuickSearchModal
           open={quickSearchOpen}
           courses={termCourses}
-          courseResults={displayCourseResults}
+          courseResults={actualCourseResults}
           mailMessages={mailMessages}
           onSelectCourse={handleSelectCourse}
-          onOpenTab={(tab) => handleNavClick(tab)}
-          onAskAi={handleAskAi}
+          onOpenTab={(tab) => {
+            if (tab === 'notifications') {
+              setMailSubTab('alerts');
+              handleNavClick('email');
+            } else if (tab === 'calculator') {
+              handleNavClick('overview');
+            } else {
+              handleNavClick(tab);
+            }
+          }}
           onClose={() => setQuickSearchOpen(false)}
         />
       )}
-
-      <AiAssistantDrawer
-        open={aiDrawerOpen}
-        initialPrompt={aiInitialPrompt}
-        onConsumeInitialPrompt={() => setAiInitialPrompt(null)}
-        termName={activeTerm?.name || 'Current Term'}
-        courses={termCourses}
-        courseResults={displayCourseResults}
-        summary={displaySummary}
-        isHypothetical={isHypothetical}
-        recentSchoolEmails={recentSchoolEmails}
-        onClose={() => setAiDrawerOpen(false)}
-      />
     </div>
   );
 }

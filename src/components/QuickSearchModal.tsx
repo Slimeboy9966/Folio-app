@@ -5,7 +5,6 @@ import {
   Calculator,
   Mail,
   Search,
-  Sparkles,
   X,
 } from 'lucide-react';
 import {
@@ -26,7 +25,6 @@ interface QuickSearchModalProps {
   mailMessages: EdupointMailMessage[];
   onSelectCourse: (courseId: string) => void;
   onOpenTab: (tab: 'overview' | 'calculator' | 'notifications' | 'scale') => void;
-  onAskAi: (prompt: string) => void;
   onClose: () => void;
 }
 
@@ -37,7 +35,6 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
   mailMessages,
   onSelectCourse,
   onOpenTab,
-  onAskAi,
   onClose,
 }) => {
   const [query, setQuery] = useState('');
@@ -154,27 +151,6 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
         </div>
 
         <div className="overflow-y-auto p-3 space-y-4">
-          {trimmed && (
-            <button
-              type="button"
-              onClick={() => {
-                onClose();
-                onAskAi(query.trim());
-              }}
-              className="w-full text-left px-3.5 py-2.5 rounded-xl bg-blue-50/80 dark:bg-sky-500/10 hover:bg-blue-100/80 dark:hover:bg-sky-500/20 border border-blue-200/70 dark:border-sky-400/25 flex items-center gap-2.5 transition-colors"
-            >
-              <Sparkles className="w-4 h-4 text-blue-600 dark:text-sky-400 shrink-0" />
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-blue-800 dark:text-sky-300">
-                  Ask Folio AI: “{query.trim()}”
-                </div>
-                <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                  Get personalized help using your live grades
-                </div>
-              </div>
-            </button>
-          )}
-
           {matchingCourses.length > 0 && (
             <div>
               <div className="px-2 mb-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
@@ -323,8 +299,7 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
             matchingAssignments.length === 0 &&
             matchingMail.length === 0 && (
               <div className="py-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                No matching courses, assignments, or mail found. Tap “Ask Folio AI” above to ask
-                directly.
+                No matching courses, assignments, or mail found.
               </div>
             )}
         </div>

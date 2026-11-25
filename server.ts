@@ -1,11 +1,9 @@
-import 'dotenv/config';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import type { Request, Response } from 'express';
 import * as cheerio from 'cheerio';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,10 +18,15 @@ const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 const RATE_LIMIT_MAX_ATTEMPTS = 25;
 
 interface EdupointSession {
+  mode: 'soap' | 'web';
   host: string;
   cookies: Map<string, string>;
   isParent: boolean;
   agu: string;
+  soapCreds?: {
+    username: string;
+    password: string;
+  };
   studentInfo: {
     name: string;
     school: string;
@@ -297,9 +300,11 @@ function parseUsDateToIso(dateStr?: string): string {
 
 function parsePercentNumber(raw?: unknown): number | null {
   if (raw === undefined || raw === null) return null;
-  const cleaned = String(raw).replace(/%/g, '').replace(/,/g, '').trim();
-  if (!cleaned) return null;
-  const n = parseFloat(cleaned);
+  const str = String(raw).trim();
+  if (!str) return null;
+  const match = str.match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const n = parseFloat(match[0]);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -310,12 +315,12 @@ function isOpaqueRandomString(raw: string): boolean {
   if (/^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i.test(s)) {
     return true;
   }
-  // Pure hex token >= 12 chars (e.g. Synergy GUID without hyphens or MD5/SHA hash)
-  if (/^[0-9a-f]{12,}$/i.test(s)) {
+  // Pure hex token >= 16 chars (e.g. Synergy GUID without hyphens or MD5/SHA hash)
+  if (/^[0-9a-f]{16,}$/i.test(s)) {
     return true;
   }
-  // Pure digits (internal row/measure ID)
-  if (/^\d+$/.test(s)) {
+  // Pure long digits >= 7 chars (internal database row/measure ID; allows short numeric titles like "101" or "42")
+  if (/^\d{7,}$/.test(s)) {
     return true;
   }
   // Serialized JSON object/array leaked into a field
@@ -326,19 +331,15 @@ function isOpaqueRandomString(raw: string): boolean {
   if (/^(?:PXP_|GB_|ctl\d+_|dx-[a-z0-9-]+|id_[a-z0-9_-]+)$/i.test(s)) {
     return true;
   }
-  // Single unbroken token (no spaces) with high letter/digit mixing or Base64 characters
-  if (!/\s/.test(s) && s.length >= 12) {
-    // Base64-like payload with + / = or mixed alphanumeric entropy
-    if (/^[A-Za-z0-9+/]{16,}={0,2}$/.test(s) && /[0-9]/.test(s) && /[a-z]/.test(s) && /[A-Z]/.test(s)) {
-      return true;
-    }
-    let transitions = 0;
-    for (let i = 1; i < s.length; i++) {
-      const prevDigit = /\d/.test(s[i - 1]);
-      const currDigit = /\d/.test(s[i]);
-      if (prevDigit !== currDigit) transitions += 1;
-    }
-    if (transitions >= 4) {
+  // Single unbroken Base64 token (no spaces) with high entropy
+  if (!/\s/.test(s) && s.length >= 22) {
+    if (
+      /^[A-Za-z0-9+/]{22,}={0,2}$/.test(s) &&
+      /[0-9]/.test(s) &&
+      /[a-z]/.test(s) &&
+      /[A-Z]/.test(s) &&
+      (/[+/=]/.test(s) || s.length >= 28)
+    ) {
       return true;
     }
   }
@@ -370,10 +371,15 @@ function tryDecodeBase64Text(s: string): string | null {
 function stripHtmlText(raw?: unknown): string {
   if (raw === undefined || raw === null) return '';
 
-  // Handle nested object wrappers like { text: "...", title: "...", value: "..." }
+  // Handle nested object wrappers like { text: "...", title: "...", Measure: "...", value: "..." }
   if (typeof raw === 'object') {
     const obj = raw as Record<string, unknown>;
     const preferred =
+      obj.Measure ??
+      obj.measure ??
+      obj.MeasureDescription ??
+      obj.Assignment ??
+      obj.assignment ??
       obj.title ??
       obj.Title ??
       obj.text ??
@@ -384,6 +390,9 @@ function stripHtmlText(raw?: unknown): string {
       obj.Label ??
       obj.description ??
       obj.Description ??
+      obj.DisplayValue ??
+      obj.Html ??
+      obj.html ??
       obj.value ??
       obj.Value;
     if (preferred !== undefined && preferred !== null && typeof preferred !== 'object') {
@@ -470,9 +479,12 @@ function parseScoreString(
     Boolean(explicitNotForGrading) ||
     lowerNotes.includes('not for grading') ||
     lowerNotes.includes('excused') ||
+    lowerNotes.includes('exempt') ||
     lowerScore === 'excused' ||
     lowerScore === 'ex' ||
-    lowerScore === 'not for grading';
+    lowerScore === 'not for grading' ||
+    lowerPoints === 'excused' ||
+    lowerPoints === 'not for grading';
 
   let earned: number | null = null;
   let possible = 0;
@@ -962,12 +974,22 @@ async function authenticateWebPortal(
 }
 
 const ASSIGNMENT_TITLE_KEYS_TIER1 = [
+  'Measure',
+  'measure',
   'MeasureDescription',
+  'GBMeasureDescription',
   'AssignmentTitle',
   'AssignmentName',
   'MeasureName',
   'GBAssignmentTitle',
   'GBAssignmentName',
+  'CourseContentName',
+  'ContentTitle',
+  'ItemName',
+  'TaskName',
+  'WorkName',
+  'AssignmentShortName',
+  'MeasureShortName',
   'DisplayTitle',
   'ActivityName',
   'ActivityTitle',
@@ -989,15 +1011,13 @@ const ASSIGNMENT_TITLE_KEYS_TIER1 = [
 const ASSIGNMENT_TITLE_KEYS_TIER2 = [
   'GBAssignment',
   'Assignment',
-  'Measure',
-  'measure',
   'assignment',
   'GBMeasure',
   'Name',
   'name',
 ];
 
-function isNonTitleValue(val: string, catName?: string): boolean {
+function isNonTitleValue(val: string, _catName?: string): boolean {
   const s = val.trim();
   if (!s || s.toUpperCase() === 'TOTAL') return true;
   // Pure date string
@@ -1013,7 +1033,6 @@ function isNonTitleValue(val: string, catName?: string): boolean {
   ) {
     return true;
   }
-  if (catName && s.toLowerCase() === catName.trim().toLowerCase()) return true;
   return false;
 }
 
@@ -1181,7 +1200,8 @@ function buildTitleLookupMap(
 function scoreAssignmentArrayCandidate(arr: Record<string, unknown>[]): number {
   if (arr.length === 0) return 0;
   let score = 0;
-  const sample = arr.slice(0, 5);
+  let humanTitleRows = 0;
+  const sample = arr.slice(0, 6);
 
   for (const obj of sample) {
     const keysLower = Object.keys(obj).map((k) => k.toLowerCase());
@@ -1207,6 +1227,8 @@ function scoreAssignmentArrayCandidate(arr: Record<string, unknown>[]): number {
         'measuredescription',
         'measurename',
         'activityname',
+        'coursecontentname',
+        'contenttitle',
         'title',
         'name',
         'displaytitle',
@@ -1217,10 +1239,11 @@ function scoreAssignmentArrayCandidate(arr: Record<string, unknown>[]): number {
 
     let rowHits = 0;
     if (titleProbe.isHuman) {
-      rowHits += 4;
+      humanTitleRows += 1;
+      rowHits += 8;
     } else if (titleProbe.title && !titleProbe.isHuman) {
-      // Penalize internal GUID/hash-keyed arrays so real display grids always win
-      rowHits -= 3;
+      // Heavily penalize opaque GUID/hash-keyed arrays so real display grids always win
+      rowHits -= 6;
     }
 
     if (keysLower.some((k) => k === 'gradebookid' || k === 'gbassignment' || k === 'measure')) {
@@ -1266,6 +1289,11 @@ function scoreAssignmentArrayCandidate(arr: Record<string, unknown>[]): number {
     if (rowHits >= 3) score += rowHits;
   }
 
+  // If NONE of the sampled rows had a human-readable title, cap score to 1 so any array or table with real titles beats it
+  if (humanTitleRows === 0) {
+    return score > 0 ? 1 : 0;
+  }
+
   return score;
 }
 
@@ -1291,8 +1319,11 @@ function extractAssignmentsFromObjectArray(
   courseId: string,
   ensureCategory: (rawName: string, weight?: number) => string,
   titleLookup?: Map<string, string>
-): ParsedAssignment[] {
+): { assignments: ParsedAssignment[]; humanTitleCount: number; fallbackTitleCount: number } {
   const out: ParsedAssignment[] = [];
+  let humanTitleCount = 0;
+  let fallbackTitleCount = 0;
+
   items.forEach((item, idx) => {
     const catName = stripHtmlText(
       item.GBAssignmentType ??
@@ -1310,6 +1341,11 @@ function extractAssignmentsFromObjectArray(
 
     const resolved = extractBestAssignmentTitle(item, catName, titleLookup);
     if (!resolved.title) return;
+    if (resolved.isHuman) {
+      humanTitleCount += 1;
+    } else {
+      fallbackTitleCount += 1;
+    }
     // Never surface a raw GUID / random alphanumeric hash as an assignment title
     const title = resolved.isHuman ? resolved.title : `${catName || 'Assignment'} #${idx + 1}`;
     if (title.toUpperCase() === 'TOTAL') return;
@@ -1408,7 +1444,7 @@ function extractAssignmentsFromObjectArray(
       excused: parsed.excused,
     });
   });
-  return out;
+  return { assignments: out, humanTitleCount, fallbackTitleCount };
 }
 
 interface RemoteCallDescriptor {
@@ -1427,12 +1463,16 @@ function parseClassDetailsHtml(
   assignments: ParsedAssignment[];
   gradingMode: 'weighted' | 'points';
   remoteCalls: RemoteCallDescriptor[];
+  humanTitleCount: number;
+  fallbackTitleCount: number;
   debugStats: { scriptArrays: number; bestScore: number; tables: number };
 } {
   const $ = cheerio.load(html);
   const categories: ParsedCategory[] = [];
   const catIdByName = new Map<string, string>();
   let assignments: ParsedAssignment[] = [];
+  let humanTitleCount = 0;
+  let fallbackTitleCount = 0;
   const remoteCalls: RemoteCallDescriptor[] = [];
 
   const ensureCategory = (rawName: string, weight = 0): string => {
@@ -1581,13 +1621,20 @@ function parseClassDetailsHtml(
   }
 
   if (bestArray && bestScore > 0) {
-    assignments = extractAssignmentsFromObjectArray(bestArray, courseId, ensureCategory, titleLookup);
+    const extracted = extractAssignmentsFromObjectArray(bestArray, courseId, ensureCategory, titleLookup);
+    assignments = extracted.assignments;
+    humanTitleCount = extracted.humanTitleCount;
+    fallbackTitleCount = extracted.fallbackTitleCount;
   }
 
-  // 3. Fallback: Parse Assignments from HTML tables (with or without <thead>)
-  if (assignments.length === 0) {
+  // 3. Fallback / Upgrade: Parse Assignments from HTML tables when no assignments OR when JSON array had fallback titles
+  if (assignments.length === 0 || fallbackTitleCount > 0) {
+    let tableAssignments: ParsedAssignment[] = [];
+    let tableHumanCount = 0;
+    let tableFallbackCount = 0;
+
     $('table').each((_, table) => {
-      if (assignments.length > 0) return;
+      if (tableAssignments.length > 0 && tableFallbackCount === 0) return;
       const headerRow = $(table).find('thead tr').first().length
         ? $(table).find('thead tr').first()
         : $(table).find('tr').first();
@@ -1620,6 +1667,10 @@ function parseClassDetailsHtml(
         ? $(table).find('tbody tr')
         : $(table).find('tr').slice(1);
 
+      const currentRows: ParsedAssignment[] = [];
+      let curHuman = 0;
+      let curFallback = 0;
+
       bodyRows.each((rIdx, tr) => {
         const cells = $(tr)
           .find('td')
@@ -1634,16 +1685,17 @@ function parseClassDetailsHtml(
         const rawTitle = cells[asgnIdx];
         if (!rawTitle || rawTitle.toUpperCase() === 'TOTAL') return;
         const catName = typeIdx >= 0 ? cells[typeIdx] : 'Coursework';
-        const title = isOpaqueRandomString(rawTitle)
-          ? `${catName || 'Assignment'} #${rIdx + 1}`
-          : rawTitle;
+        const isOpaque = isOpaqueRandomString(rawTitle);
+        if (isOpaque) curFallback += 1;
+        else curHuman += 1;
+        const title = isOpaque ? `${catName || 'Assignment'} #${rIdx + 1}` : rawTitle;
         const catId = ensureCategory(catName);
         const parsed = parseScoreString(
           cells[pointsIdx] || '',
           scoreColIdx >= 0 ? cells[scoreColIdx] || '' : '',
           notesIdx >= 0 ? cells[notesIdx] || '' : ''
         );
-        assignments.push({
+        currentRows.push({
           id: `${courseId}-tr-${rIdx}`,
           categoryId: catId,
           title,
@@ -1654,7 +1706,22 @@ function parseClassDetailsHtml(
           excused: parsed.excused,
         });
       });
+
+      if (curHuman > tableHumanCount || (curHuman === tableHumanCount && currentRows.length > tableAssignments.length)) {
+        tableAssignments = currentRows;
+        tableHumanCount = curHuman;
+        tableFallbackCount = curFallback;
+      }
     });
+
+    if (
+      tableAssignments.length > 0 &&
+      (assignments.length === 0 || tableHumanCount > humanTitleCount)
+    ) {
+      assignments = tableAssignments;
+      humanTitleCount = tableHumanCount;
+      fallbackTitleCount = tableFallbackCount;
+    }
   }
 
   if (categories.length === 0) {
@@ -1669,6 +1736,8 @@ function parseClassDetailsHtml(
     assignments,
     gradingMode,
     remoteCalls,
+    humanTitleCount,
+    fallbackTitleCount,
     debugStats: {
       scriptArrays: allCandidateArrays.length,
       bestScore,
@@ -1984,11 +2053,19 @@ async function fetchWebPortalGradebook(
           });
         });
       } else {
-        // Enrich any candidate with authoritative ClassDetailControl if provided
+        // Enrich any candidate with authoritative ClassDetailControl & teacher name if provided
         for (const cand of candidates) {
           const match = classes.find((cls) => String(cls.ID) === String(cand.focusArgs.classID));
-          if (match && typeof match.ClassDetailControl === 'string' && match.ClassDetailControl) {
-            cand.controlName = match.ClassDetailControl;
+          if (match) {
+            if (typeof match.ClassDetailControl === 'string' && match.ClassDetailControl) {
+              cand.controlName = match.ClassDetailControl;
+            }
+            const staffName = String(
+              match.TeacherName || match.Staff || match.Instructor || ''
+            ).trim();
+            if (staffName && (!cand.instructor || cand.instructor === 'Instructor')) {
+              cand.instructor = staffName;
+            }
           }
         }
       }
@@ -2050,7 +2127,7 @@ async function fetchWebPortalGradebook(
     remoteCalls: RemoteCallDescriptor[],
     courseId: string,
     existingCategories: ParsedCategory[]
-  ): Promise<ParsedAssignment[]> => {
+  ): Promise<{ assignments: ParsedAssignment[]; humanTitleCount: number; fallbackTitleCount: number }> => {
     const catIdByName = new Map(existingCategories.map((c) => [c.name.toLowerCase(), c.id]));
     const ensureCat = (rawName: string, weight = 0) => {
       const clean = stripHtmlText(rawName) || 'Coursework';
@@ -2066,6 +2143,12 @@ async function fetchWebPortalGradebook(
       catIdByName.set(clean.toLowerCase(), id);
       existingCategories.push({ id, name: clean, weight });
       return id;
+    };
+
+    let bestRemote: { assignments: ParsedAssignment[]; humanTitleCount: number; fallbackTitleCount: number } = {
+      assignments: [],
+      humanTitleCount: 0,
+      fallbackTitleCount: 0,
     };
 
     for (const rc of remoteCalls) {
@@ -2144,13 +2227,22 @@ async function fetchWebPortalGradebook(
             ensureCat,
             remoteTitleLookup
           );
-          if (extracted.length > 0) return extracted;
+          if (
+            extracted.humanTitleCount > bestRemote.humanTitleCount ||
+            (extracted.humanTitleCount === bestRemote.humanTitleCount &&
+              extracted.assignments.length > bestRemote.assignments.length)
+          ) {
+            bestRemote = extracted;
+          }
+          if (extracted.assignments.length > 0 && extracted.fallbackTitleCount === 0) {
+            return extracted;
+          }
         }
       } catch {
         // Ignore individual remote probe failures
       }
     }
-    return [];
+    return bestRemote;
   };
 
   // Fetch detailed categories & assignments sequentially (avoids ASP.NET session-state lock races)
@@ -2166,19 +2258,23 @@ async function fetchWebPortalGradebook(
       { id: `${courseId}-cat-0`, name: 'Coursework', weight: 100 },
     ];
     let assignments: ParsedAssignment[] = [];
+    let bestHumanTitles = 0;
+    let bestFallbackTitles = 0;
     let gradingMode: 'weighted' | 'points' = 'points';
 
-    // Build ordered list of (controlName, parameters) attempts
+    // Always try Gradebook_ClassDetails (assignment view) FIRST so exact StudentVUE assignment titles win
     const attempts: Array<{ control: string; params: Record<string, unknown> }> = [
-      { control: cand.controlName || 'Gradebook_ClassDetails', params: cand.focusArgs },
-    ];
-    if (cand.controlName !== 'Gradebook_ClassDetails' || cand.focusArgs.viewName !== 'assignment') {
-      attempts.push({
+      {
         control: 'Gradebook_ClassDetails',
         params: { ...cand.focusArgs, viewName: 'assignment' },
-      });
+      },
+    ];
+    if (cand.controlName && cand.controlName !== 'Gradebook_ClassDetails') {
+      attempts.push({ control: cand.controlName, params: cand.focusArgs });
+    } else if (cand.focusArgs.viewName && cand.focusArgs.viewName !== 'assignment') {
+      attempts.push({ control: 'Gradebook_ClassDetails', params: cand.focusArgs });
     }
-    if (cand.controlName !== 'Gradebook_RichContentClassDetails') {
+    if (!attempts.some((a) => a.control === 'Gradebook_RichContentClassDetails')) {
       attempts.push({
         control: 'Gradebook_RichContentClassDetails',
         params: { ...cand.focusArgs, viewName: 'courseContent' },
@@ -2187,6 +2283,7 @@ async function fetchWebPortalGradebook(
 
     try {
       let bestParsed: ReturnType<typeof parseClassDetailsHtml> | null = null;
+      const collectedRemoteCalls: RemoteCallDescriptor[] = [];
 
       for (const attempt of attempts) {
         const { html, rawData } = await loadClassDetails(attempt.control, attempt.params);
@@ -2223,10 +2320,17 @@ async function fetchWebPortalGradebook(
               ensureCat,
               rawTitleLookup
             );
-            if (extracted.length > 0) {
-              assignments = extracted;
+            if (
+              extracted.humanTitleCount > bestHumanTitles ||
+              (extracted.humanTitleCount === bestHumanTitles && extracted.assignments.length > assignments.length)
+            ) {
+              assignments = extracted.assignments;
+              bestHumanTitles = extracted.humanTitleCount;
+              bestFallbackTitles = extracted.fallbackTitleCount;
               categories = cats.length > 0 ? cats : categories;
               gradingMode = categories.some((c) => c.weight > 0) ? 'weighted' : 'points';
+            }
+            if (extracted.assignments.length > 0 && extracted.fallbackTitleCount === 0) {
               break;
             }
           }
@@ -2236,29 +2340,50 @@ async function fetchWebPortalGradebook(
         if (!html) continue;
 
         const parsed = parseClassDetailsHtml(html, courseId);
-        if (!bestParsed || parsed.assignments.length > bestParsed.assignments.length) {
+        for (const rc of parsed.remoteCalls) {
+          collectedRemoteCalls.push(rc);
+        }
+
+        const isBetter =
+          !bestParsed ||
+          parsed.humanTitleCount > bestParsed.humanTitleCount ||
+          (parsed.humanTitleCount === bestParsed.humanTitleCount &&
+            parsed.assignments.length > bestParsed.assignments.length);
+
+        if (isBetter) {
           bestParsed = parsed;
         }
-        if (parsed.assignments.length > 0) {
+        // Only stop early if we found real human-readable titles with zero fallbacks
+        if (parsed.assignments.length > 0 && parsed.fallbackTitleCount === 0) {
           break;
         }
       }
 
-      if (bestParsed && assignments.length === 0) {
+      if (
+        bestParsed &&
+        (bestParsed.humanTitleCount > bestHumanTitles ||
+          (bestParsed.humanTitleCount === bestHumanTitles &&
+            bestParsed.assignments.length > assignments.length))
+      ) {
         categories = bestParsed.categories;
         assignments = bestParsed.assignments;
+        bestHumanTitles = bestParsed.humanTitleCount;
+        bestFallbackTitles = bestParsed.fallbackTitleCount;
         gradingMode = bestParsed.gradingMode;
+      }
 
-        if (assignments.length === 0 && bestParsed.remoteCalls.length > 0) {
-          const remoteAssignments = await fetchRemoteAssignments(
-            bestParsed.remoteCalls,
-            courseId,
-            categories
-          );
-          if (remoteAssignments.length > 0) {
-            assignments = remoteAssignments;
-            gradingMode = categories.some((c) => c.weight > 0) ? 'weighted' : 'points';
-          }
+      if ((assignments.length === 0 || bestFallbackTitles > 0) && collectedRemoteCalls.length > 0) {
+        const remoteRes = await fetchRemoteAssignments(
+          collectedRemoteCalls,
+          courseId,
+          categories
+        );
+        if (
+          remoteRes.humanTitleCount > bestHumanTitles ||
+          (assignments.length === 0 && remoteRes.assignments.length > 0)
+        ) {
+          assignments = remoteRes.assignments;
+          gradingMode = categories.some((c) => c.weight > 0) ? 'weighted' : 'points';
         }
       }
     } catch {
@@ -2812,6 +2937,340 @@ async function fetchWebPortalMail(session: EdupointSession): Promise<ParsedMailM
   return [];
 }
 
+/* ============================================================================
+ * Edupoint StudentVUE Official SOAP API (Service/PXPCommunication.asmx)
+ * Returns authoritative XML with exact teacher-assigned Measure titles,
+ * exact Staff teacher names, exact Points/Score/Notes, and ReportingPeriods.
+ * ============================================================================ */
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+async function callStudentVueSoap(
+  host: string,
+  username: string,
+  password: string,
+  isParent: boolean,
+  methodName: string,
+  paramXml: string
+): Promise<string> {
+  const endpoint = `https://${host}/Service/PXPCommunication.asmx`;
+  const envelope = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <ProcessWebServiceRequest xmlns="http://edupoint.com/webservices/">
+      <userID>${escapeXml(username)}</userID>
+      <password>${escapeXml(password)}</password>
+      <skipLoginLog>1</skipLoginLog>
+      <parent>${isParent ? '1' : '0'}</parent>
+      <webServiceHandleName>PXPWebServices</webServiceHandleName>
+      <methodName>${escapeXml(methodName)}</methodName>
+      <paramStr>${escapeXml(paramXml)}</paramStr>
+    </ProcessWebServiceRequest>
+  </soap:Body>
+</soap:Envelope>`;
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml; charset=utf-8',
+      SOAPAction: '"http://edupoint.com/webservices/ProcessWebServiceRequest"',
+      'User-Agent': BROWSER_USER_AGENT,
+    },
+    body: envelope,
+    signal: AbortSignal.timeout(20000),
+  });
+
+  if (!res.ok) {
+    throw new Error(`SOAP_UNAVAILABLE_HTTP_${res.status}`);
+  }
+
+  const rawSoap = await res.text();
+  const $soap = cheerio.load(rawSoap, { xmlMode: true });
+  const fault = $soap('faultstring').first().text().trim();
+  if (fault) {
+    throw new Error(fault);
+  }
+
+  const innerXml = $soap('ProcessWebServiceRequestResult').first().text().trim();
+  if (!innerXml) {
+    throw new Error('SOAP_EMPTY_RESPONSE');
+  }
+
+  const $inner = cheerio.load(innerXml, { xmlMode: true });
+  const rtError = $inner('RT_ERROR').first();
+  if (rtError.length > 0) {
+    const errMsg =
+      rtError.attr('ERROR_MESSAGE') ||
+      rtError.attr('ErrorMessage') ||
+      rtError.text().trim() ||
+      'StudentVUE request failed.';
+    throw new Error(errMsg);
+  }
+
+  return innerXml;
+}
+
+async function fetchSoapStudentInfo(
+  host: string,
+  username: string,
+  password: string,
+  isParent: boolean
+): Promise<{ name: string; school: string; grade: string } | null> {
+  try {
+    const xml = await callStudentVueSoap(
+      host,
+      username,
+      password,
+      isParent,
+      'StudentInfo',
+      '<Parms><ChildIntID>0</ChildIntID></Parms>'
+    );
+    const $ = cheerio.load(xml, { xmlMode: true });
+    const name = $('FormattedName').first().text().trim() || username;
+    const school =
+      $('CurrentSchool').first().text().trim() ||
+      (host === DEFAULT_DISTRICT_HOST ? 'Amador Valley High School' : host);
+    const grade = $('Grade').first().text().trim() || '';
+    return { name, school, grade };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSoapMail(
+  host: string,
+  username: string,
+  password: string,
+  isParent: boolean
+): Promise<ParsedMailMessage[]> {
+  try {
+    const xml = await callStudentVueSoap(
+      host,
+      username,
+      password,
+      isParent,
+      'GetPXPMessages',
+      '<Parms><ChildIntID>0</ChildIntID></Parms>'
+    );
+    const $ = cheerio.load(xml, { xmlMode: true });
+    const messages: ParsedMailMessage[] = [];
+    $('MessageListing').each((idx, el) => {
+      const $el = $(el);
+      const subject = stripHtmlText($el.attr('Subject') || '');
+      if (!subject) return;
+      const sender = stripHtmlText($el.attr('From') || '') || 'Edupoint Mail';
+      const beginDate = $el.attr('BeginDate') || '';
+      const readFlag = ($el.attr('Read') || '').toLowerCase();
+      const preview = stripHtmlText($el.attr('Content') || '');
+      messages.push({
+        id: $el.attr('ID') || `soap-mail-${idx}`,
+        subject: subject.slice(0, 180),
+        sender: sender.slice(0, 100),
+        date: parseUsDateToIso(beginDate),
+        preview: preview.slice(0, 320),
+        unread: readFlag === 'false' || readFlag === '0',
+        folder: 'Inbox',
+      });
+    });
+    return messages.slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchSoapGradebook(
+  host: string,
+  username: string,
+  password: string,
+  isParent: boolean,
+  reportPeriod?: string
+): Promise<{
+  reportingPeriods: ReportingPeriodInfo[];
+  activePeriodIndex: string;
+  activePeriodName: string;
+  termId: string;
+  courses: ParsedCourse[];
+}> {
+  const periodTag =
+    reportPeriod !== undefined && reportPeriod !== '' && /^\d+$/.test(reportPeriod)
+      ? `<ReportPeriod>${reportPeriod}</ReportPeriod>`
+      : '';
+  const xml = await callStudentVueSoap(
+    host,
+    username,
+    password,
+    isParent,
+    'Gradebook',
+    `<Parms><ChildIntID>0</ChildIntID>${periodTag}</Parms>`
+  );
+
+  const $ = cheerio.load(xml, { xmlMode: true });
+
+  const reportingPeriods: ReportingPeriodInfo[] = [];
+  $('ReportingPeriods > ReportPeriod').each((idx, el) => {
+    const $el = $(el);
+    const index = ($el.attr('Index') ?? String(idx)).trim();
+    const name = ($el.attr('GradePeriod') || `Period ${idx + 1}`).trim();
+    const startDate = ($el.attr('StartDate') || '').trim();
+    const endDate = ($el.attr('EndDate') || '').trim();
+    reportingPeriods.push({ index, name, startDate, endDate });
+  });
+
+  const activeRpNode = $('Gradebook > ReportingPeriod').first();
+  const activePeriodName =
+    (activeRpNode.attr('GradePeriod') || '').trim() ||
+    reportingPeriods[0]?.name ||
+    'Current Term';
+
+  const matchedRp = reportingPeriods.find(
+    (rp) =>
+      (reportPeriod && rp.index === reportPeriod) ||
+      rp.name.toLowerCase() === activePeriodName.toLowerCase()
+  );
+  const activePeriodIndex = matchedRp?.index || reportPeriod || reportingPeriods[0]?.index || '0';
+  const termId = `edupoint-${host}-${activePeriodIndex}`;
+
+  const courses: ParsedCourse[] = [];
+  let totalAssignments = 0;
+
+  $('Courses > Course').each((cIdx, courseEl) => {
+    const $course = $(courseEl);
+    const rawTitle = ($course.attr('Title') || `Class ${cIdx + 1}`).trim();
+    const period = ($course.attr('Period') || String(cIdx + 1)).trim();
+    const staff = stripHtmlText($course.attr('Staff') || '').trim() || 'Instructor';
+    const { code, name } = cleanCourseNameAndCode(rawTitle, period);
+    const courseId = `edupoint-${activePeriodIndex}-c${cIdx}`;
+
+    const marks = $course.find('Marks > Mark');
+    // Pick the active Mark (prefer one matching activePeriodName or having assignments, else last)
+    let chosenMark = marks.last();
+    marks.each((_, mEl) => {
+      const $m = $(mEl);
+      const markName = ($m.attr('MarkName') || '').trim().toLowerCase();
+      if (markName && markName === activePeriodName.toLowerCase()) {
+        chosenMark = $m;
+      }
+    });
+
+    const officialLetterRaw = (chosenMark.attr('CalculatedScoreString') || '').trim();
+    const officialLetter = /^[ABCDF][+-]?$/i.test(officialLetterRaw)
+      ? officialLetterRaw.toUpperCase()
+      : null;
+    const officialPercentRaw = parsePercentNumber(chosenMark.attr('CalculatedScoreRaw'));
+    const officialPercent =
+      officialPercentRaw !== null && officialPercentRaw >= 0 && officialPercentRaw <= 150
+        ? officialPercentRaw
+        : null;
+
+    const categories: ParsedCategory[] = [];
+    const catIdByName = new Map<string, string>();
+    const ensureCategory = (rawName: string, weight = 0): string => {
+      const cleanName = stripHtmlText(rawName) || 'Coursework';
+      const key = cleanName.toLowerCase();
+      const existing = catIdByName.get(key);
+      if (existing) {
+        if (weight > 0) {
+          const cat = categories.find((c) => c.id === existing);
+          if (cat && cat.weight === 0) cat.weight = weight;
+        }
+        return existing;
+      }
+      const id = `${courseId}-cat-${categories.length}`;
+      catIdByName.set(key, id);
+      categories.push({ id, name: cleanName, weight });
+      return id;
+    };
+
+    chosenMark.find('GradeCalculationSummary > AssignmentGradeCalc').each((_, calcEl) => {
+      const $calc = $(calcEl);
+      const typeName = stripHtmlText($calc.attr('Type') || '');
+      if (!typeName || typeName.toUpperCase() === 'TOTAL') return;
+      const weight = parsePercentNumber($calc.attr('Weight')) ?? 0;
+      ensureCategory(typeName, weight);
+    });
+
+    const assignments: ParsedAssignment[] = [];
+    chosenMark.find('Assignments > Assignment').each((aIdx, asgnEl) => {
+      const $a = $(asgnEl);
+      const rawMeasure = stripHtmlText($a.attr('Measure') || '');
+      const rawDesc = stripHtmlText($a.attr('MeasureDescription') || '');
+      const catName = stripHtmlText($a.attr('Type') || '') || 'Coursework';
+      const title = rawMeasure || rawDesc || `${catName} #${aIdx + 1}`;
+      if (!title || title.toUpperCase() === 'TOTAL') return;
+
+      const catId = ensureCategory(catName);
+      const pointsAttr = $a.attr('Points') || '';
+      const scoreAttr = $a.attr('Score') || '';
+      const notesAttr = $a.attr('Notes') || '';
+      const scoreTypeAttr = $a.attr('ScoreType') || '';
+      const dueDateAttr = $a.attr('DueDate') || $a.attr('Date') || '';
+      const gbId = ($a.attr('GradebookID') || String(aIdx)).trim();
+
+      const parsedScore = parseScoreString(
+        pointsAttr,
+        scoreAttr,
+        notesAttr,
+        undefined,
+        scoreTypeAttr,
+        false,
+        false
+      );
+
+      assignments.push({
+        id: `${courseId}-a-${gbId}-${aIdx}`,
+        categoryId: catId,
+        title,
+        dueDate: parseUsDateToIso(dueDateAttr),
+        earned: parsedScore.earned,
+        possible: parsedScore.possible,
+        extraCredit: parsedScore.extraCredit,
+        excused: parsedScore.excused,
+      });
+    });
+
+    if (categories.length === 0) {
+      categories.push({ id: `${courseId}-cat-0`, name: 'Coursework', weight: 100 });
+    }
+    const totalWeight = categories.reduce((sum, c) => sum + c.weight, 0);
+    const gradingMode: 'weighted' | 'points' = totalWeight > 0 ? 'weighted' : 'points';
+
+    totalAssignments += assignments.length;
+    courses.push({
+      id: courseId,
+      termId,
+      code,
+      name,
+      instructor: staff,
+      credits: 5,
+      gradingMode,
+      categories,
+      assignments,
+      source: 'edupoint',
+      officialPercent,
+      officialLetter,
+    });
+  });
+
+  console.info(
+    `[edupoint-soap-sync] host=${host} courses=${courses.length} assignments=${totalAssignments}`
+  );
+
+  return {
+    reportingPeriods,
+    activePeriodIndex,
+    activePeriodName,
+    termId,
+    courses,
+  };
+}
+
 function getBearerToken(req: Request): string | null {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith('Bearer ')) return null;
@@ -3188,24 +3647,72 @@ async function createServer() {
     }
 
     try {
-      const authResult = await authenticateWebPortal(host, username, password, isParent);
-
-      const session: EdupointSession = {
-        host,
-        cookies: authResult.cookies,
-        isParent,
-        agu: authResult.agu,
-        studentInfo: {
-          name: username,
-          school:
-            host === DEFAULT_DISTRICT_HOST ? 'Amador Valley High School' : host,
-          grade: '',
-        },
-        expiresAt: Date.now() + SESSION_TTL_MS,
+      let session: EdupointSession;
+      let gradebook: {
+        reportingPeriods: ReportingPeriodInfo[];
+        activePeriodIndex: string;
+        activePeriodName: string;
+        termId: string;
+        courses: ParsedCourse[];
       };
+      let mailMessages: ParsedMailMessage[] = [];
 
-      const gradebook = await fetchWebPortalGradebook(session);
-      const mailMessages = await fetchWebPortalMail(session).catch(() => [] as ParsedMailMessage[]);
+      // 1. Prefer official StudentVUE SOAP API (exact teacher-assigned Measure titles & Staff names)
+      let usedSoap = false;
+      try {
+        const soapGradebook = await fetchSoapGradebook(host, username, password, isParent);
+        if (soapGradebook.courses.length > 0) {
+          const [soapStudentInfo, soapMail] = await Promise.all([
+            fetchSoapStudentInfo(host, username, password, isParent),
+            fetchSoapMail(host, username, password, isParent),
+          ]);
+          session = {
+            mode: 'soap',
+            host,
+            cookies: new Map<string, string>(),
+            isParent,
+            agu: '0',
+            soapCreds: { username, password },
+            studentInfo: soapStudentInfo || {
+              name: username,
+              school: host === DEFAULT_DISTRICT_HOST ? 'Amador Valley High School' : host,
+              grade: '',
+            },
+            expiresAt: Date.now() + SESSION_TTL_MS,
+          };
+          gradebook = soapGradebook;
+          mailMessages = soapMail;
+          usedSoap = true;
+        }
+      } catch (soapErr) {
+        const soapMsg = soapErr instanceof Error ? soapErr.message : '';
+        if (/invalid|password|user id|locked|expired|incorrect|disabled/i.test(soapMsg) && !/soap_unavailable|service/i.test(soapMsg)) {
+          throw soapErr;
+        }
+        // Otherwise fall back to PXP2 web portal seamlessly
+      }
+
+      if (!usedSoap) {
+        const authResult = await authenticateWebPortal(host, username, password, isParent);
+
+        session = {
+          mode: 'web',
+          host,
+          cookies: authResult.cookies,
+          isParent,
+          agu: authResult.agu,
+          studentInfo: {
+            name: username,
+            school:
+              host === DEFAULT_DISTRICT_HOST ? 'Amador Valley High School' : host,
+            grade: '',
+          },
+          expiresAt: Date.now() + SESSION_TTL_MS,
+        };
+
+        gradebook = await fetchWebPortalGradebook(session);
+        mailMessages = await fetchWebPortalMail(session).catch(() => [] as ParsedMailMessage[]);
+      }
 
       if (sessions.size >= MAX_SESSIONS) {
         const oldestKey = sessions.keys().next().value;
@@ -3213,15 +3720,15 @@ async function createServer() {
       }
 
       const token = crypto.randomBytes(32).toString('hex');
-      sessions.set(token, session);
+      sessions.set(token, session!);
 
       res.json({
         token,
         host,
-        studentInfo: session.studentInfo,
+        studentInfo: session!.studentInfo,
         syncedAt: new Date().toISOString(),
         mailMessages,
-        ...gradebook,
+        ...gradebook!,
       });
     } catch (err) {
       const message =
@@ -3257,11 +3764,28 @@ async function createServer() {
     }
 
     try {
-      const gradebook = await fetchWebPortalGradebook(
-        session,
-        reportPeriod && reportPeriod !== 'current' ? reportPeriod : undefined
-      );
-      const mailMessages = await fetchWebPortalMail(session).catch(() => [] as ParsedMailMessage[]);
+      const periodArg = reportPeriod && reportPeriod !== 'current' ? reportPeriod : undefined;
+      const gradebook =
+        session.mode === 'soap' && session.soapCreds
+          ? await fetchSoapGradebook(
+              session.host,
+              session.soapCreds.username,
+              session.soapCreds.password,
+              session.isParent,
+              periodArg
+            )
+          : await fetchWebPortalGradebook(session, periodArg);
+
+      const mailMessages =
+        session.mode === 'soap' && session.soapCreds
+          ? await fetchSoapMail(
+              session.host,
+              session.soapCreds.username,
+              session.soapCreds.password,
+              session.isParent
+            ).catch(() => [] as ParsedMailMessage[])
+          : await fetchWebPortalMail(session).catch(() => [] as ParsedMailMessage[]);
+
       res.json({
         syncedAt: new Date().toISOString(),
         mailMessages,
@@ -3270,7 +3794,7 @@ async function createServer() {
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Unable to refresh grades from Edupoint.';
-      if (message === 'SESSION_EXPIRED') {
+      if (message === 'SESSION_EXPIRED' || /invalid|password|user id/i.test(message)) {
         sessions.delete(token);
         res.status(401).json({ error: 'StudentVUE session expired. Please sign in again.' });
         return;
@@ -3296,7 +3820,15 @@ async function createServer() {
     session.expiresAt = Date.now() + SESSION_TTL_MS;
 
     try {
-      const messages = await fetchWebPortalMail(session);
+      const messages =
+        session.mode === 'soap' && session.soapCreds
+          ? await fetchSoapMail(
+              session.host,
+              session.soapCreds.username,
+              session.soapCreds.password,
+              session.isParent
+            )
+          : await fetchWebPortalMail(session);
       res.json({
         messages,
         unreadCount: messages.filter((m) => m.unread).length,
@@ -3340,441 +3872,6 @@ async function createServer() {
     }
     res.json({ ok: true });
   });
-
-  // ---------------- Server-Side Gemini AI Academic Assistant ----------------
-
-  const aiRateLimitMap = new Map<string, number[]>();
-  const AI_RATE_WINDOW_MS = 60_000;
-  const AI_RATE_MAX = 25;
-
-  function checkAiRateLimit(ip: string): boolean {
-    const now = Date.now();
-    const recent = (aiRateLimitMap.get(ip) || []).filter((ts) => now - ts < AI_RATE_WINDOW_MS);
-    if (recent.length >= AI_RATE_MAX) {
-      aiRateLimitMap.set(ip, recent);
-      return false;
-    }
-    recent.push(now);
-    aiRateLimitMap.set(ip, recent);
-    return true;
-  }
-
-  function createGeminiClient(): GoogleGenAI | null {
-    const apiKey = (process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
-    if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') return null;
-    return new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-  }
-
-  function formatGeminiError(err: unknown): { status: number; message: string; isTransient: boolean } {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    const status =
-      typeof err === 'object' && err !== null && 'status' in err
-        ? Number((err as { status?: unknown }).status)
-        : 0;
-
-    const isTransient =
-      status === 503 || status === 500 || /temporarily unavailable|timeout|ECONNRESET/i.test(errMsg);
-
-    if (status === 403 || (status === 400 && /API_KEY_INVALID|API key/i.test(errMsg))) {
-      return {
-        status: 503,
-        message:
-          'The Gemini API key appears invalid or missing permissions. Please check Settings > Secrets.',
-        isTransient: false,
-      };
-    }
-    if (status === 429 || /RESOURCE_EXHAUSTED/i.test(errMsg)) {
-      return {
-        status: 429,
-        message:
-          'AI request quota was temporarily reached. Please wait a moment and try again.',
-        isTransient: false,
-      };
-    }
-    return {
-      status: 502,
-      message: 'Could not reach the AI assistant right now. Please try again in a moment.',
-      isTransient,
-    };
-  }
-
-  app.post('/api/ai/chat', async (req: Request, res: Response) => {
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    if (!checkAiRateLimit(ip)) {
-      res.status(429).json({
-        error: 'Too many AI requests in a short time. Please wait a few seconds and try again.',
-      });
-      return;
-    }
-
-    const ai = createGeminiClient();
-    if (!ai) {
-      res.status(503).json({
-        error:
-          'The AI Assistant needs a Gemini API key configured in Settings > Secrets (GEMINI_API_KEY).',
-      });
-      return;
-    }
-
-    const body = (req.body || {}) as Record<string, unknown>;
-    const rawMessages = Array.isArray(body.messages) ? body.messages : [];
-    if (rawMessages.length === 0) {
-      res.status(400).json({ error: 'Please enter a question for the AI Assistant.' });
-      return;
-    }
-
-    // Normalize turns: drop leading model messages and merge consecutive same-role turns
-    // so Gemini always receives valid alternating user/model content.
-    const sanitizedMessages: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
-    for (const item of rawMessages.slice(-16)) {
-      if (!item || typeof item !== 'object') continue;
-      const rec = item as Record<string, unknown>;
-      const role: 'user' | 'model' = rec.role === 'model' ? 'model' : 'user';
-      const text = typeof rec.text === 'string' ? rec.text.trim().slice(0, 2000) : '';
-      if (!text) continue;
-
-      if (sanitizedMessages.length === 0 && role === 'model') {
-        continue;
-      }
-      const prev = sanitizedMessages[sanitizedMessages.length - 1];
-      if (prev && prev.role === role) {
-        prev.parts[0].text = `${prev.parts[0].text}\n\n${text}`.slice(0, 3500);
-      } else {
-        sanitizedMessages.push({ role, parts: [{ text }] });
-      }
-    }
-
-    if (
-      sanitizedMessages.length === 0 ||
-      sanitizedMessages[sanitizedMessages.length - 1].role !== 'user'
-    ) {
-      res.status(400).json({ error: 'A valid user message is required.' });
-      return;
-    }
-
-    const gradebookContext =
-      typeof body.gradebookContext === 'string'
-        ? body.gradebookContext.trim().slice(0, 12_000)
-        : '';
-
-    const systemInstruction = [
-      'You are Folio AI, a supportive, sharp, and practical academic coach built into a student gradebook app.',
-      'Use ONLY the student gradebook context provided below for specific grades, weights, GPA, and assignments—never invent assignments or scores that are not listed.',
-      'Be concise, encouraging, and directly actionable (aim for 120–260 words unless the student asks for a longer study guide, quiz, or email draft).',
-      'Use short bullet points and bold highlights so answers are easy to scan on a phone.',
-      'When giving grade strategy advice, prioritize highest-weight categories, missing/0-point assignments, and borderline grades close to the next letter grade.',
-      'When asked to quiz the student or explain a topic, tailor practice questions to their actual course subject and upcoming test/quiz titles.',
-      gradebookContext
-        ? `\n--- CURRENT STUDENT GRADEBOOK SNAPSHOT ---\n${gradebookContext}\n--- END SNAPSHOT ---`
-        : '',
-    ].join('\n');
-
-    const wantsJson = body.stream === false || req.query.mode === 'json';
-
-    if (wantsJson) {
-      const attemptJson = async (attempt: number): Promise<void> => {
-        try {
-          const response = await ai.models.generateContent({
-            model: 'gemini-4-hydrogen',
-            contents: sanitizedMessages,
-            config: {
-              systemInstruction,
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            },
-          });
-          const text =
-            (response.text || '').trim() ||
-            'I could not generate a response for that prompt. Try rephrasing your question.';
-          res.json({ text });
-        } catch (err: unknown) {
-          console.error('[Folio AI JSON error]', err instanceof Error ? err.message : String(err));
-          const mapped = formatGeminiError(err);
-          if (mapped.isTransient && attempt < 2) {
-            await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-            return attemptJson(attempt + 1);
-          }
-          res.status(mapped.status).json({ error: mapped.message });
-        }
-      };
-      await attemptJson(0);
-      return;
-    }
-
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders?.();
-
-    const sendEvent = (payload: Record<string, unknown>) => {
-      if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify(payload)}\n\n`);
-      }
-    };
-
-    const attemptStream = async (attempt: number): Promise<void> => {
-      try {
-        const stream = await ai.models.generateContentStream({
-          model: 'gemini-4-hydrogen',
-          contents: sanitizedMessages,
-          config: {
-            systemInstruction,
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          },
-        });
-
-        let emittedAny = false;
-        for await (const chunk of stream) {
-          const chunkText = chunk.text;
-          if (chunkText) {
-            emittedAny = true;
-            sendEvent({ delta: chunkText });
-          }
-        }
-        if (!emittedAny) {
-          sendEvent({
-            delta: 'I could not generate a response for that prompt. Try rephrasing your question.',
-          });
-        }
-        sendEvent({ done: true });
-      } catch (err: unknown) {
-        console.error('[Folio AI stream error]', err instanceof Error ? err.message : String(err));
-        const mapped = formatGeminiError(err);
-        if (mapped.isTransient && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-          return attemptStream(attempt + 1);
-        }
-        sendEvent({ error: mapped.message });
-      }
-    };
-
-    try {
-      await attemptStream(0);
-    } finally {
-      if (!res.writableEnded) {
-        res.end();
-      }
-    }
-  });
-
-  app.post('/api/ai/email-assist', async (req: Request, res: Response) => {
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    if (!checkAiRateLimit(ip)) {
-      res.status(429).json({
-        error: 'Too many AI requests in a short time. Please wait a few seconds and try again.',
-      });
-      return;
-    }
-
-    const ai = createGeminiClient();
-    if (!ai) {
-      res.status(503).json({
-        error:
-          'Folio AI needs a Gemini API key configured in Settings > Secrets (GEMINI_API_KEY).',
-      });
-      return;
-    }
-
-    const body = (req.body || {}) as Record<string, unknown>;
-    const action = typeof body.action === 'string' ? body.action.trim() : '';
-    if (!['summarize', 'generate-reply', 'format-grammar', 'compose'].includes(action)) {
-      res.status(400).json({ error: 'Unsupported email assistant action.' });
-      return;
-    }
-
-    const tone = typeof body.tone === 'string' ? body.tone.trim() : 'polite-teacher';
-    const toneGuideMap: Record<string, string> = {
-      'polite-teacher':
-        'Respectful, polite, clear high school student writing to a teacher or counselor. Include a proper greeting and polite sign-off.',
-      concise:
-        'Brief, direct, and respectful. Keep it tight (3–5 sentences) while maintaining proper greeting, grammar, and sign-off.',
-      clarification:
-        'Polite and specific while asking clear follow-up questions to clarify an assignment, grade, or instruction.',
-      'extension-help':
-        'Respectful, accountable, and proactive when asking for help, office hours, retake options, or a reasonable extension.',
-    };
-    const toneGuide = toneGuideMap[tone] || toneGuideMap['polite-teacher'];
-
-    const studentName =
-      typeof body.studentName === 'string' ? body.studentName.trim().slice(0, 100) : '';
-    const schoolName =
-      typeof body.schoolName === 'string' ? body.schoolName.trim().slice(0, 120) : '';
-    const instruction =
-      typeof body.instruction === 'string' ? body.instruction.trim().slice(0, 1000) : '';
-    const draft = typeof body.draft === 'string' ? body.draft.trim().slice(0, 8000) : '';
-    const subject = typeof body.subject === 'string' ? body.subject.trim().slice(0, 240) : '';
-    const recipient =
-      typeof body.recipient === 'string' ? body.recipient.trim().slice(0, 200) : '';
-
-    const rawOrig =
-      body.originalEmail && typeof body.originalEmail === 'object'
-        ? (body.originalEmail as Record<string, unknown>)
-        : null;
-    const origFrom = rawOrig && typeof rawOrig.from === 'string' ? rawOrig.from.slice(0, 240) : '';
-    const origSubject =
-      rawOrig && typeof rawOrig.subject === 'string' ? rawOrig.subject.slice(0, 240) : '';
-    const origDate = rawOrig && typeof rawOrig.date === 'string' ? rawOrig.date.slice(0, 120) : '';
-    const origBody =
-      rawOrig && typeof rawOrig.body === 'string' ? rawOrig.body.slice(0, 10_000) : '';
-
-    if (action === 'summarize' && !origBody) {
-      res.status(400).json({ error: 'An email body is required to summarize.' });
-      return;
-    }
-    if (action === 'format-grammar' && !draft) {
-      res.status(400).json({ error: 'Please type a draft message to format and fix grammar.' });
-      return;
-    }
-
-    const systemInstruction = [
-      'You are Folio AI, an academic writing and school email assistant for high school students.',
-      'Always respond with valid JSON matching the requested schema. Do NOT wrap JSON in markdown code fences.',
-      'Never fabricate personal facts, excuses, dates, or assignment scores that were not provided by the user or original email.',
-      'For formatted email bodies, output clean plain text with natural paragraph breaks (no markdown asterisks, no HTML, no "Subject:" header line inside the body).',
-      studentName ? `Student name for sign-off (if appropriate): ${studentName}` : '',
-      schoolName ? `Student school: ${schoolName}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    let userPrompt = '';
-    if (action === 'summarize') {
-      userPrompt = [
-        'Read this school email and return JSON with exact keys:',
-        '{"summary": "2-3 clear sentences summarizing the email", "actionItems": ["short bullet item 1", "short bullet item 2"]}',
-        'Highlight any deadlines, tests, quizzes, meetings, or questions the student needs to respond to.',
-        '',
-        `From: ${origFrom}`,
-        `Subject: ${origSubject}`,
-        `Date: ${origDate}`,
-        'Body:',
-        origBody,
-      ].join('\n');
-    } else if (action === 'generate-reply') {
-      userPrompt = [
-        'Write a well-formatted email reply to the school email below and return JSON with exact keys:',
-        '{"formattedBody": "complete plain-text email reply with greeting, clean paragraphs, and sign-off", "improvements": ["1-3 short notes about what the reply addresses"]}',
-        `Tone & formatting guidance: ${toneGuide}`,
-        instruction ? `Student instructions for this reply: ${instruction}` : '',
-        draft ? `Student rough draft to build from:\n${draft}` : '',
-        '',
-        'Original email to reply to:',
-        `From: ${origFrom}`,
-        `Subject: ${origSubject}`,
-        `Date: ${origDate}`,
-        'Body:',
-        origBody,
-      ]
-        .filter(Boolean)
-        .join('\n');
-    } else if (action === 'format-grammar') {
-      userPrompt = [
-        'Fix all grammar, spelling, punctuation, capitalization, phrasing, and email formatting in the student draft below while preserving their exact intent and facts.',
-        'Return JSON with exact keys:',
-        '{"formattedBody": "polished plain-text email with proper greeting, clean paragraphs, and polite sign-off", "suggestedSubject": "short clear subject if helpful, or empty string", "improvements": ["2-4 brief plain-language bullet points of grammar/formatting fixes made"]}',
-        `Tone & formatting guidance: ${toneGuide}`,
-        origBody
-          ? `\nContext — original email being replied to:\nFrom: ${origFrom}\nSubject: ${origSubject}\n${origBody.slice(0, 3000)}`
-          : '',
-        '',
-        'Student draft to fix and format:',
-        draft,
-      ]
-        .filter(Boolean)
-        .join('\n');
-    } else {
-      userPrompt = [
-        'Draft a brand-new, properly formatted school email based on the student notes below and return JSON with exact keys:',
-        '{"formattedBody": "complete plain-text email with greeting, clean paragraphs, and sign-off", "suggestedSubject": "clear, concise email subject line", "improvements": ["1-3 short notes about how the email was structured"]}',
-        `Tone & formatting guidance: ${toneGuide}`,
-        recipient ? `Recipient: ${recipient}` : '',
-        subject ? `Current subject: ${subject}` : '',
-        instruction ? `What the student wants to say: ${instruction}` : '',
-        draft ? `Existing rough notes:\n${draft}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
-    }
-
-    const attemptAssist = async (attempt: number): Promise<void> => {
-      try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
-          contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
-          config: {
-            systemInstruction,
-            responseMimeType: 'application/json',
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          },
-        });
-
-        const rawText = (response.text || '').trim();
-        let parsed: Record<string, unknown> | null = null;
-        try {
-          parsed = JSON.parse(rawText) as Record<string, unknown>;
-        } catch {
-          const match = /\{[\s\S]*\}/.exec(rawText);
-          if (match) {
-            try {
-              parsed = JSON.parse(match[0]) as Record<string, unknown>;
-            } catch {
-              parsed = null;
-            }
-          }
-        }
-
-        if (!parsed) {
-          if (action === 'summarize') {
-            res.json({ summary: rawText || 'Could not summarize email.', actionItems: [] });
-          } else {
-            res.json({ formattedBody: rawText, improvements: [] });
-          }
-          return;
-        }
-
-        const toStringArray = (val: unknown): string[] =>
-          Array.isArray(val)
-            ? val
-                .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-                .map((item) => item.trim())
-                .slice(0, 6)
-            : [];
-
-        res.json({
-          summary: typeof parsed.summary === 'string' ? parsed.summary.trim() : undefined,
-          actionItems: toStringArray(parsed.actionItems),
-          formattedBody:
-            typeof parsed.formattedBody === 'string' ? parsed.formattedBody.trim() : undefined,
-          suggestedSubject:
-            typeof parsed.suggestedSubject === 'string'
-              ? parsed.suggestedSubject.trim()
-              : undefined,
-          improvements: toStringArray(parsed.improvements),
-        });
-      } catch (err: unknown) {
-        console.error(
-          '[Folio AI email-assist error]',
-          err instanceof Error ? err.message : String(err)
-        );
-        const mapped = formatGeminiError(err);
-        if (mapped.isTransient && attempt < 2) {
-          await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-          return attemptAssist(attempt + 1);
-        }
-        res.status(mapped.status).json({ error: mapped.message });
-      }
-    };
-
-    await attemptAssist(0);
-  });
-
 
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
