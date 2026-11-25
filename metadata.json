@@ -1,0 +1,6 @@
+{
+  "name": "Folio — Gradebook & Hypothetical Simulator",
+  "description": "View your course grades, track term and cumulative GPA, and test what-if grade scenarios in hypothetical mode.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
