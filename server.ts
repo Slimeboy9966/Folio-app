@@ -3343,7 +3343,7 @@ function verifyAuthenticatorDataFlagsAndRp(
   return { ok: true };
 }
 
-async function createServer() {
+export function createApiApp() {
   const app = express();
   app.set('trust proxy', true);
   app.use(express.json({ limit: '2mb' }));
@@ -3873,6 +3873,12 @@ async function createServer() {
     res.json({ ok: true });
   });
 
+  return app;
+}
+
+async function startServer() {
+  const app = createApiApp();
+
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -3893,7 +3899,10 @@ async function createServer() {
   });
 }
 
-createServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+// On Vercel the API runs as a serverless function (api/index.ts) and the frontend is served statically.
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
